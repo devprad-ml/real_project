@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
+
 from fastapi import status
+
 from app.db import get_session
 
 
@@ -32,5 +34,6 @@ def test_readiness_failure(client):
         assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 
     finally:
-        client.app.dependency_overrides.clear()  # to prevent test pollution - broken client leaking to success test scenarios.
+        # prevent test pollution: broken client leaking into success test scenarios
+        client.app.dependency_overrides.clear()
 

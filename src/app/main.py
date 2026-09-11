@@ -1,14 +1,15 @@
 ''' init fastAPI api factory, lifespan, router wiring'''
 # standard library imports always first
 from contextlib import asynccontextmanager
-# then third party dependencies
+from importlib.metadata import PackageNotFoundError, version
 
+# then third party dependencies
 from fastapi import FastAPI
 from sqlalchemy import text
-from importlib.metadata import PackageNotFoundError, version
+
 # then first party(local files)
-from app.db import engine
 from app.api.health import router as health_router
+from app.db import engine
 
 # check version match else revert to default
 try:

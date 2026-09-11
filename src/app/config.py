@@ -1,7 +1,10 @@
 ''' Application config file '''
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, SecretStr
 from functools import lru_cache
+
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
 class Settings(BaseSettings):
     database_url: SecretStr
     blob_backend: str = "local"   # local or AWS S3
