@@ -14,6 +14,7 @@ dependencies = [
     "psycopg2>=2.9.13",
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
+    "ruff>=0.16.7",
     "sqlalchemy>=2.0.52",
     "uvicorn[standard]>=0.52.4",
 ]
