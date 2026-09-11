@@ -40,7 +40,6 @@ select = [
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.12.1",
     "pytest>=9.1.1",
     "python-dotenv>=1.2.3",
 ]
