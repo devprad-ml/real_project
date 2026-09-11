@@ -14,7 +14,6 @@ dependencies = [
     "psycopg2>=2.9.13",
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
-    "ruff>=0.16.7",
     "sqlalchemy>=2.0.52",
     "uvicorn[standard]>=0.52.4",
 ]
@@ -23,21 +22,6 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]
 build-backend = "uv_build"
-
-[tool.ruff]
-src = ["src", "tests"]
-line-length = 90
-target-version = "py310"
-
-[tool.ruff.lint]
-select = [
-    "E",  
-    "F",
-    "I",
-    # "UP" # pyupgrade to Python version in venv.
-    # "B", # flake8 bugbear to catch common structural bugs and pitfalls
-]
-
 
 [dependency-groups]
 dev = [

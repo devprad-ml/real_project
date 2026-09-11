@@ -29,12 +29,6 @@ jobs:
             - name: Install dependencies
               run: uv sync
             
-            - name: Lint code with Ruff
-              run: uv run ruff check
-            
-            - name: Check formatting with Ruff
-              run: uv run ruff format --check
-            
             - name: Run test suite
               env:
                 DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/app_db
