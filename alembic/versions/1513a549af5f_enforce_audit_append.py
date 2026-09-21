@@ -19,12 +19,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
+    """Upgrade schema."""   
     op.execute("REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC;")
-    pass
+    
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     op.execute("GRANT UPDATE, DELETE ON audit_log TO PUBLIC;")
-    pass
+    
