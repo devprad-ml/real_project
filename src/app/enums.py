@@ -29,8 +29,10 @@ class AuditAction(str, Enum):
     VIEW = "view"
     EXPORT = "export"
     RECLASSIFY = "reclassify"
-    RESOLVED = "resolved"
+    RESOLVE = "resolve"
     DELETE = "delete"
+    
+    
 
 
 
