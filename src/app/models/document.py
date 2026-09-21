@@ -11,10 +11,10 @@ from app.enums import DocumentStatus, DocumentType
 
 class Document(Base):
     __tablename__ = "documents"
-    __table_args__ = (UniqueConstraint("sha256", name="unique_sha256"),)
+    __table_args__ = (UniqueConstraint("tenant_id","sha256", name="unique_tenant_sha256"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    # tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clients.id"))  for later
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clients.id")) 
     sha256: Mapped[str] = mapped_column(String(64))
     doc_type: Mapped[DocumentType] = mapped_column(SQLEnum(DocumentType, native_enum=False))  # unknown type is weak excuse for enterprise app
     blob_key: Mapped[str] = mapped_column(String(1024))
