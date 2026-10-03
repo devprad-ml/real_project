@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: SecretStr
+    # Migrations run as an owner/superuser (CREATE TABLE, CREATE ROLE, GRANT);
+    # database_url is the narrow app_user the API and worker run as. Unset in CI,
+    # where the single DATABASE_URL already has the rights.
+    alembic_database_url: SecretStr | None = None
     blob_backend: str = "local"   # local or AWS S3
     blob_local_root: str = "./_blobs"
     anthropic_api_key: SecretStr
