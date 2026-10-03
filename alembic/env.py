@@ -5,12 +5,24 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 
+from app.config import get_settings
 from app.models.base import Base
 import app.models
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# alembic.ini is committed, so it carries no credential. Resolve the URL here:
+# ALEMBIC_DATABASE_URL (an owner/superuser, needed for CREATE TABLE and GRANT)
+# if set, otherwise DATABASE_URL. Both are read from .env by Settings, so this
+# works the same from a shell, from CI, and from a tool that sets neither.
+if not config.get_main_option("sqlalchemy.url", None):
+    settings = get_settings()
+    url = settings.alembic_database_url or settings.database_url
+    # ConfigParser interpolates %, so a password containing one would blow up
+    # here with a baffling error rather than a connection failure.
+    config.set_main_option("sqlalchemy.url", url.get_secret_value().replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

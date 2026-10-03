@@ -36,6 +36,13 @@ jobs:
             - name: Install dependencies
               run: uv sync
             
+            - name: Apply migrations
+              env:
+                DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/app_db
+                ANTHROPIC_API_KEY: some_anthropic_key
+                DOWNSTREAM_BASE_URL: http://downstream.valid
+              run: uv run alembic upgrade head
+
             - name: Run test suite
               env:
                 DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/app_db

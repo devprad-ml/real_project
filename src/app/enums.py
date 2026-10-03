@@ -24,6 +24,19 @@ class DocumentStatus(str, Enum):
     FAILED = "FAILED"
     
 
+class JobKind(str, Enum):
+    NORMALIZE = "normalize"
+    OCR = "ocr"
+    EMBED = "embed"
+
+
+class JobState(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    ERROR = "error"
+
+
 class AuditAction(str, Enum):
     STATE_CHANGE = "state_change"
     VIEW = "view"
