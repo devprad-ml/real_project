@@ -8,17 +8,21 @@ env = Path(__file__).resolve().parent.parent / ".env.test"
 load_dotenv(dotenv_path=env, override=True)
 
 # import pytest now
+import os  # noqa: E402
 import uuid  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 # import app factory
 from app.db import SessionLocal  # noqa: E402
 from app.enums import DocumentStatus, DocumentType  # noqa: E402
+from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
+from app.processing import normalize, ocr  # noqa: E402
 
 
 @pytest.fixture
@@ -79,3 +83,67 @@ def make_doc(tenant):
             return doc
 
     return _make
+
+
+# --- fakes shared by the handler and worker tests ----------------------------
+
+FAKE_PDFA = b"%PDF-1.7 fake pdfa"
+PAGE_TEXTS = ["page one text", "page two text", ""]
+
+
+class FakeBlobStore:
+    """In-memory BlobStore. Structurally compatible -- Protocol, not inheritance."""
+
+    def __init__(self, seed=None):
+        self.data = dict(seed or {})
+
+    def put(self, key, data, content_type):
+        self.data[key] = data
+
+    def get(self, key):
+        return self.data[key]
+
+    def url(self, key):
+        return f"memory://{key}"
+
+
+@pytest.fixture
+def blob(monkeypatch):
+    store = FakeBlobStore({"raw/test/file.pdf": b"original record bytes"})
+    monkeypatch.setattr(handlers, "get_blob_store", lambda: store)
+    return store
+
+
+@pytest.fixture
+def fake_tools(monkeypatch):
+    """Stand in for Tesseract/Ghostscript. These tests are about the state machine,
+    not about whether OCR can read a fax."""
+    monkeypatch.setattr(normalize, "run", lambda data: (FAKE_PDFA, len(PAGE_TEXTS)))
+    monkeypatch.setattr(ocr, "pages", lambda pdf: enumerate(PAGE_TEXTS, start=1))
+
+
+# --- the restricted application role -----------------------------------------
+
+APP_USER_URL = os.environ.get("APP_USER_DATABASE_URL")
+
+
+@pytest.fixture(scope="session")
+def app_user_sessionmaker():
+    """Sessions bound to `app_user`, the role the API and worker actually run as.
+
+    The rest of the suite connects as the owner because teardown needs DELETE. That
+    means no other test can see the grant model at all -- an handler that deleted a
+    row would pass here and raise InsufficientPrivilege in the worker.
+    """
+    if not APP_USER_URL:
+        pytest.skip("APP_USER_DATABASE_URL not set; privilege tests need app_user")
+    engine = create_engine(APP_USER_URL, pool_pre_ping=True)
+    yield sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    engine.dispose()
+
+
+@pytest.fixture
+def app_user_session(app_user_sessionmaker):
+    with app_user_sessionmaker() as session:
+        yield session
+        session.rollback()
