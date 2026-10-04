@@ -15,7 +15,7 @@ from app.enums import DocumentStatus, JobKind, JobState
 from app.errors import PermanentError
 from app.jobs import worker
 from app.jobs.queue import enqueue
-from app.models import Document, Job
+from app.models import Document, DocumentPages, Job
 
 
 def _seed_job(tenant, doc, kind=JobKind.NORMALIZE):
@@ -47,6 +47,30 @@ def test_run_once_drives_the_real_normalize_handler(tenant, make_doc, blob, fake
         assert s.get(Job, job_id).state == JobState.DONE
         assert s.get(Document, doc.id).status == DocumentStatus.NORMALIZED
     assert f"derived/{tenant}/{doc.sha256}/normalized.pdf" in blob.data
+
+
+def test_run_once_drives_the_real_embed_handler(
+    tenant, make_doc, vectors, fake_embedder
+):
+    """The last transition this phase, through the worker rather than called directly
+    -- the embed handler talks to a store outside the transaction, so its wiring is
+    worth proving at the dispatch level too."""
+    doc = make_doc(status=DocumentStatus.OCR_DONE)
+    with SessionLocal() as s:
+        s.add(
+            DocumentPages(
+                tenant_id=tenant, document_id=doc.id, page_no=1, ocr_text="a page"
+            )
+        )
+        s.commit()
+    job_id = _seed_job(tenant, doc, kind=JobKind.EMBED)
+
+    assert worker.run_once() is True
+
+    with SessionLocal() as s:
+        assert s.get(Job, job_id).state == JobState.DONE
+        assert s.get(Document, doc.id).status == DocumentStatus.EMBEDDED
+    assert len(vectors.points(f"chunks_{tenant}")) == 1
 
 
 def test_successful_job_is_marked_done_and_unlocked(tenant, make_doc, monkeypatch):
@@ -106,9 +130,11 @@ def test_permanent_error_fails_the_document_immediately(tenant, make_doc, monkey
         assert s.get(Document, doc.id).status == DocumentStatus.FAILED
 
 
-def test_a_kind_with_no_handler_is_permanent(tenant, make_doc):
-    """`embed` is a real JobKind with no handler yet. A typo'd or not-yet-built kind
-    must not spend MAX_ATTEMPTS discovering it still does not exist."""
+def test_a_kind_with_no_handler_is_permanent(tenant, make_doc, monkeypatch):
+    """A JobKind with no registered handler -- a typo'd or not-yet-built kind -- must
+    not spend MAX_ATTEMPTS discovering it still does not exist. Every JobKind has a
+    handler today, so one is unregistered here to reach that path."""
+    monkeypatch.delitem(worker.HANDLERS, JobKind.EMBED)
     doc = make_doc()
     job_id = _seed_job(tenant, doc, kind=JobKind.EMBED)
 

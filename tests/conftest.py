@@ -22,7 +22,7 @@ from app.enums import DocumentStatus, DocumentType  # noqa: E402
 from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
-from app.processing import normalize, ocr  # noqa: E402
+from app.processing import embed, normalize, ocr  # noqa: E402
 
 
 @pytest.fixture
@@ -120,6 +120,44 @@ def fake_tools(monkeypatch):
     not about whether OCR can read a fax."""
     monkeypatch.setattr(normalize, "run", lambda data: (FAKE_PDFA, len(PAGE_TEXTS)))
     monkeypatch.setattr(ocr, "pages", lambda pdf: enumerate(PAGE_TEXTS, start=1))
+
+
+class FakeVectorStore:
+    """In-memory stand-in for qdrant. Keyed by collection, then by point id, so an
+    upsert of an id already present overwrites -- the one behaviour of a real vector
+    DB that the embed handler's retry story depends on."""
+
+    def __init__(self):
+        self.collections: dict[str, dict[str, object]] = {}
+        self.upserts = 0  # a replay that writes nothing still must not call upsert
+
+    def upsert(self, collection, points):
+        self.upserts += 1
+        target = self.collections.setdefault(collection, {})
+        for p in points:
+            target[p.id] = p
+
+    def drop(self, collection):
+        self.collections.pop(collection, None)
+
+    def points(self, collection):
+        return list(self.collections.get(collection, {}).values())
+
+
+@pytest.fixture
+def vectors(monkeypatch):
+    store = FakeVectorStore()
+    monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
+    return store
+
+
+@pytest.fixture
+def fake_embedder(monkeypatch):
+    """No torch, no model download in CI. The vector values are arbitrary but
+    distinct per text, which is enough to assert chunk-to-vector alignment."""
+    monkeypatch.setattr(
+        embed, "encode", lambda texts: [[float(len(t)), 0.0, 1.0] for t in texts]
+    )
 
 
 # --- the restricted application role -----------------------------------------
