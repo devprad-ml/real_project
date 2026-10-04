@@ -157,3 +157,44 @@ minutes happened to load a different `.env` file than pytest does, and crashed.
 
 The uncomfortable question isn't "how did this bug get in" — it got in the obvious way, one
 convenient shortcut at a time. It's: what else is only true in my test environment?
+
+---
+---
+
+# LinkedIn post — "25 passed locally. 13 errors in CI."
+
+*(Ready to paste. About 270 words. Plain text, no markdown, because LinkedIn doesn't render it.)*
+
+```
+25 tests passed on my machine. In CI, 13 of them errored before running a single line of test code.
+
+The error: relation "clients" does not exist.
+
+I'd just pushed a background job queue for a side project. Locally everything was green. In GitHub Actions, every test that touched a table fell over at setup.
+
+The cause was embarrassingly simple. My CI started a fresh Postgres, then ran pytest. It never ran my database migrations. Locally my schema had existed for weeks, so I never noticed.
+
+Why had this stayed hidden? My only database test up to then was SELECT 1. It needs no tables. The first test that needed a real schema was the first test to expose the gap.
+
+The obvious fix was one line: add "alembic upgrade head" to the workflow. That failed too. I'd gitignored my alembic.ini weeks earlier because it had a hardcoded password in it. So CI had no migration config at all.
+
+The real fix was to remove the reason it was ignored, not to work around it: commit the file with the credential blanked, and have the code read the database URL from settings instead.
+
+Two lessons:
+
+1. A green test suite only means something if it starts from the same blank state production does. Mine quietly inherited a schema I'd built by hand.
+
+2. I found a second bug the same week with the same shape. My tests ran as a database superuser while the app ran as a restricted role, so none of my permission rules were ever tested.
+
+Both times the test environment was supplying something production wouldn't.
+
+What's in your test environment that production doesn't have?
+
+#softwareengineering #postgres #python #testing #cicd
+```
+
+**Notes before posting:**
+
+- The "13 errors" figure is the count of `ERROR at setup` lines in the CI log you pasted: 4 handler tests plus 9 queue tests (the 3 backoff cases are counted separately). The other 12 tests passed in CI because they never touch a table.
+- I have not seen the CI run go green after the fix. Don't post "and now it passes" until it does; the draft deliberately stops at the lesson.
+- The `app_user` / superuser story is the first post in this file. If you publish both, post that one first and let this one reference it.

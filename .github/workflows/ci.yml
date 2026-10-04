@@ -46,6 +46,10 @@ jobs:
             - name: Run test suite
               env:
                 DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/app_db
+                # The restricted role the app actually runs as, created by migration
+                # 3f4b8b1e99a0. Without it the privilege tests skip, and the grant
+                # model goes untested -- CI is otherwise a superuser.
+                APP_USER_DATABASE_URL: postgresql+psycopg2://app_user:password2@localhost:5432/app_db
                 ANTHROPIC_API_KEY: some_anthropic_key
                 DOWNSTREAM_BASE_URL: http://downstream.valid
               run: uv run pytest
