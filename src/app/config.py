@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     classify_model: str = "claude-sonnet-5"     # TODO: model cascade ? see design doc
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
     max_attempts: int = Field(5, ge=1)
+    qdrant_url: str = "http://localhost:6333"
+    # embed_dim must match embed_model's output width -- a collection is created with
+    # a fixed vector size, so swapping the model means a new collection, not a reuse.
+    embed_model: str = "all-MiniLM-L6-v2"
+    embed_dim: int = Field(384, ge=1)
     imap_host: str | None = None
     imap_user: str | None = None
     imap_password: SecretStr | None = None

@@ -21,6 +21,8 @@ dependencies = [
     "python-multipart>=0.0.32",
     "sqlalchemy>=2.0.52",
     "uvicorn[standard]>=0.52.4",
+    "sentence-transformers>=6.1.0",
+    "qdrant-client>=1.19.1",
 ]
 
 
