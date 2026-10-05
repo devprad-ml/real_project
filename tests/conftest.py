@@ -19,6 +19,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 # import app factory
 from app.db import SessionLocal  # noqa: E402
 from app.enums import DocumentStatus, DocumentType  # noqa: E402
+from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
@@ -40,6 +41,10 @@ def db():
         yield session
 
 
+def intake_address(tenant_id) -> str:
+    return f"intake+{tenant_id.hex}@example.com"
+
+
 @pytest.fixture
 def tenant():
     """A throwaway client row, plus teardown of everything hung off it.
@@ -48,13 +53,19 @@ def tenant():
     """
     tenant_id = uuid.uuid4()
     with SessionLocal() as session:
-        session.add(Client(id=tenant_id, name=f"test-{tenant_id}"))
+        session.add(
+            Client(
+                id=tenant_id,
+                name=f"test-{tenant_id}",
+                intake_address=intake_address(tenant_id),
+            )
+        )
         session.commit()
 
     yield tenant_id
 
     with SessionLocal() as session:
-        for table in ("jobs", "document_pages", "audit_log", "sources", "documents"):
+        for table in ("jobs", "document_pages", "audit_log", "documents", "sources"):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
                 {"t": tenant_id},
@@ -65,8 +76,8 @@ def tenant():
 
 @pytest.fixture
 def make_doc(tenant):
-    """Factory for documents rows. No intake channel exists yet, so tests seed
-    directly."""
+    """Factory for documents rows at an arbitrary status. Intake tests go through
+    intake_bytes instead; the pipeline tests need to start mid-pipeline."""
 
     def _make(status=DocumentStatus.RECEIVED, **kwargs):
         with SessionLocal() as session:
@@ -111,6 +122,7 @@ class FakeBlobStore:
 def blob(monkeypatch):
     store = FakeBlobStore({"raw/test/file.pdf": b"original record bytes"})
     monkeypatch.setattr(handlers, "get_blob_store", lambda: store)
+    monkeypatch.setattr(intake, "get_blob_store", lambda: store)
     return store
 
 
@@ -158,6 +170,76 @@ def fake_embedder(monkeypatch):
     monkeypatch.setattr(
         embed, "encode", lambda texts: [[float(len(t)), 0.0, 1.0] for t in texts]
     )
+
+
+# --- a fake IMAP mailbox ---------------------------------------------------------
+
+
+class FakeMessage:
+    """The slice of imap_tools.MailMessage the poller reads."""
+
+    def __init__(self, uid, obj):
+        self.uid = str(uid)
+        self.obj = obj
+        self.from_ = obj["From"]
+        self.subject = obj["Subject"]
+        self.headers = {k.lower(): (v,) for k, v in obj.items()}
+
+
+def make_message(uid, *, to, attachments=(), extra_headers=None):
+    """attachments: (filename, bytes) pairs, built into a real MIME message."""
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "billing@hospital.example"
+    msg["To"] = to
+    msg["Subject"] = f"documents {uid}"
+    for k, v in (extra_headers or {}).items():
+        msg[k] = v
+    msg.set_content("see attached")
+    for filename, data in attachments:
+        msg.add_attachment(
+            data, maintype="application", subtype="octet-stream", filename=filename
+        )
+    return FakeMessage(uid, msg)
+
+
+class FakeMailBox:
+    """In-memory imap_tools.MailBox: the login context manager, fetch, flag, and the
+    UIDVALIDITY lookup -- the only surface the poller touches."""
+
+    def __init__(self):
+        self.messages = []
+        self.seen = set()
+        self.flag_fails = False  # a flag that never lands, after the commit did
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    @property
+    def folder(self):
+        return self
+
+    def status(self, name):
+        return {"UIDVALIDITY": 1}
+
+    def fetch(self, criteria, **kwargs):
+        return [m for m in self.messages if m.uid not in self.seen]
+
+    def flag(self, uid, flag, value):
+        if self.flag_fails:
+            raise ConnectionError("imap connection dropped")
+        self.seen.add(uid)
+
+
+@pytest.fixture
+def mailbox(monkeypatch):
+    box = FakeMailBox()
+    monkeypatch.setattr(email_poller, "_open_mailbox", lambda: box)
+    return box
 
 
 # --- the restricted application role -----------------------------------------

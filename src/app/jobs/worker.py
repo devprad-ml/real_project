@@ -9,9 +9,11 @@ import datetime
 import signal
 import time
 
+from app.config import get_settings
 from app.db import SessionLocal
 from app.enums import JobState
 from app.errors import PermanentError
+from app.ingestion.email_poller import poll_once
 from app.jobs.handlers import HANDLERS
 from app.jobs.queue import claim_one, fail_with_backoff, sweep_stale
 from app.models.document import Document
@@ -82,7 +84,9 @@ def run_forever() -> None:
     signal.signal(signal.SIGINT, _request_stop)
     signal.signal(signal.SIGTERM, _request_stop)
 
+    settings = get_settings()
     last_sweep = 0.0
+    last_poll = 0.0
     while not _stop:
         if time.monotonic() - last_sweep > SWEEP_EVERY_SECONDS:
             with SessionLocal() as session:
@@ -91,6 +95,17 @@ def run_forever() -> None:
             if reclaimed:
                 print(f"swept {reclaimed} stale job(s) back to pending")
             last_sweep = time.monotonic()
+
+        # ponytail: the poller is a tick in this loop, so a long OCR job delays the next
+        # poll. Split it into its own process if the queue is ever saturated.
+        if settings.imap_host and time.monotonic() - last_poll > settings.imap_poll_seconds:
+            try:
+                new = poll_once(SessionLocal)
+                if new:
+                    print(f"intake: {new} new document(s)")
+            except Exception as exc:  # a mailbox outage must not stop job processing
+                print(f"intake poll failed: {exc!r}")
+            last_poll = time.monotonic()
 
         if not run_once():
             time.sleep(IDLE_SLEEP_SECONDS)

@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     imap_host: str | None = None
     imap_user: str | None = None
     imap_password: SecretStr | None = None
+    imap_mailbox: str = "INBOX"
+    imap_poll_seconds: int = Field(60, ge=1)
+    # Cap at intake: the blob is never written, so an oversized attachment costs nothing.
+    max_attachment_bytes: int = Field(25 * 1024 * 1024, ge=1)
     downstream_base_url: str  # str for now, change to HttpUrl later
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
