@@ -176,25 +176,36 @@ def fake_embedder(monkeypatch):
 
 
 class FakeMessage:
-    """The slice of imap_tools.MailMessage the poller reads."""
+    """The slice of imap_tools.MailMessage the poller reads.
+
+    `headers` mirrors imap_tools' LazyHeaders: keys lowercased, value a tuple of
+    *every* occurrence. A forwarding chain really does carry several Delivered-To
+    headers, and a dict that kept only the last would hide that from the tests.
+    """
 
     def __init__(self, uid, obj):
-        self.uid = str(uid)
+        self.uid = None if uid is None else str(uid)
         self.obj = obj
         self.from_ = obj["From"]
         self.subject = obj["Subject"]
-        self.headers = {k.lower(): (v,) for k, v in obj.items()}
+        self.headers = {
+            key.lower(): tuple(v for k, v in obj.items() if k.lower() == key.lower())
+            for key in obj.keys()
+        }
 
 
-def make_message(uid, *, to, attachments=(), extra_headers=None):
-    """attachments: (filename, bytes) pairs, built into a real MIME message."""
+def make_message(uid, *, to=None, attachments=(), extra_headers=()):
+    """attachments: (filename, bytes) pairs, built into a real MIME message.
+    extra_headers: pairs, not a dict -- repeated headers are the point."""
     from email.message import EmailMessage
 
     msg = EmailMessage()
     msg["From"] = "billing@hospital.example"
-    msg["To"] = to
+    if to is not None:
+        msg["To"] = to
     msg["Subject"] = f"documents {uid}"
-    for k, v in (extra_headers or {}).items():
+    pairs = getattr(extra_headers, "items", lambda: extra_headers)()
+    for k, v in pairs:
         msg[k] = v
     msg.set_content("see attached")
     for filename, data in attachments:

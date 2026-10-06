@@ -98,7 +98,8 @@ def run_forever() -> None:
 
         # ponytail: the poller is a tick in this loop, so a long OCR job delays the next
         # poll. Split it into its own process if the queue is ever saturated.
-        if settings.imap_host and time.monotonic() - last_poll > settings.imap_poll_seconds:
+        due = time.monotonic() - last_poll > settings.imap_poll_seconds
+        if settings.imap_host and due:
             try:
                 new = poll_once(SessionLocal)
                 if new:

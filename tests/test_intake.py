@@ -93,7 +93,25 @@ def test_the_same_bytes_for_two_tenants_is_two_documents(tenant, blob):
         ("evil\x00name.pdf", "evilname.pdf"),
         ("", "unnamed"),
         ("..", "unnamed"),
+        # Windows drive-relative: Path("_blobs") / "raw/t/s/C:evil.pdf" resolves to
+        # C:evil.pdf, so the bytes would land outside the blob root entirely.
+        ("C:evil.pdf", "Cevil.pdf"),
+        ("C:/Windows/evil.pdf", "evil.pdf"),
     ],
 )
 def test_a_hostile_filename_cannot_escape_the_blob_prefix(hostile, expected):
     assert safe_filename(hostile) == expected
+
+
+def test_the_written_path_stays_under_the_blob_root(tenant, blob, tmp_path):
+    """The sanitiser is a string check; this is the property it exists for."""
+    from pathlib import Path
+
+    from app.storage.blob import LocalBlobStore
+
+    store = LocalBlobStore(str(tmp_path))
+    root = tmp_path.resolve()
+    for hostile in ("C:evil.pdf", "../../escape.pdf", "..\\..\\escape.pdf"):
+        key = f"raw/{tenant}/{'0' * 64}/{safe_filename(hostile)}"
+        store.put(key, b"x", "application/octet-stream")
+        assert root in Path(store._path(key)).resolve().parents

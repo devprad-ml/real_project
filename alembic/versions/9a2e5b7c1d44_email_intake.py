@@ -20,11 +20,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.add_column('clients', sa.Column('intake_address', sa.String(length=255), nullable=True))
+    op.add_column(
+        'clients', sa.Column('intake_address', sa.String(length=255), nullable=True)
+    )
     op.create_unique_constraint('unique_intake_address', 'clients', ['intake_address'])
     op.add_column('documents', sa.Column('source_id', sa.Uuid(), nullable=True))
-    op.add_column('documents', sa.Column('source_filename', sa.String(length=255), nullable=True))
-    op.create_foreign_key('fk_documents_source_id', 'documents', 'sources', ['source_id'], ['id'])
+    op.add_column(
+        'documents', sa.Column('source_filename', sa.String(length=255), nullable=True)
+    )
+    op.create_foreign_key(
+        'fk_documents_source_id', 'documents', 'sources', ['source_id'], ['id']
+    )
     # No grant changes: app_user already has SELECT on clients and SELECT/INSERT on
     # documents and sources, and intake never updates a sources row.
 
