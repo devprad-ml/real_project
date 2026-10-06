@@ -116,6 +116,39 @@ def test_delivered_to_beats_a_non_matching_to(tenant, blob, mailbox):
     assert poll_once(SessionLocal) == 1
 
 
+def test_a_forwarding_chain_is_routed_by_any_delivered_to(tenant, blob, mailbox):
+    """A real forward carries one Delivered-To per hop. Only one of them is ours, and
+    it is not necessarily the last."""
+    mailbox.messages = [
+        make_message(
+            1,
+            to="someone-else@hospital.example",
+            attachments=[("a.pdf", b"AAA")],
+            extra_headers=[
+                ("Delivered-To", intake_address(tenant)),
+                ("Delivered-To", "relay@hospital.example"),
+            ],
+        )
+    ]
+
+    assert poll_once(SessionLocal) == 1
+
+
+def test_a_message_with_no_uid_is_skipped_not_half_ingested(tenant, blob, mailbox):
+    """Some servers return no UID. Without one there is no ref to dedupe on and no
+    handle to flag, so every such message would share the ref '<user>:<validity>:None'
+    -- the first ingested, the rest dropped as already-processed."""
+    to = intake_address(tenant)
+    mailbox.messages = [
+        make_message(None, to=to, attachments=[("a.pdf", b"AAA")]),
+        make_message(None, to=to, attachments=[("b.pdf", b"BBB")]),
+    ]
+
+    assert poll_once(SessionLocal) == 0
+
+    assert _docs(tenant) == [] and _sources(tenant) == []
+
+
 def test_an_oversized_attachment_is_skipped_and_recorded(
     tenant, blob, mailbox, monkeypatch
 ):
@@ -207,6 +240,18 @@ def test_a_forwarded_email_is_unwrapped_not_stored_as_eml():
 def test_nesting_stops_at_the_depth_cap():
     assert list(_attachments(_wrap(_with_pdf(), MAX_EML_DEPTH)))  # deepest allowed
     assert list(_attachments(_wrap(_with_pdf(), MAX_EML_DEPTH + 1))) == []
+
+
+def test_an_inline_pdf_is_still_a_document():
+    """A scanner that emails inline with a Content-ID is sending a document. Only
+    images get the signature-logo treatment."""
+    msg = EmailMessage()
+    msg.set_content("scan")
+    msg.add_attachment(
+        b"%PDF-scan", maintype="application", subtype="pdf", filename="scan.pdf",
+        disposition="inline", cid="<scan@x>",
+    )
+    assert list(_attachments(msg)) == [("scan.pdf", b"%PDF-scan")]
 
 
 def test_a_signature_logo_is_not_a_document():

@@ -18,9 +18,16 @@ from app.storage import get_blob_store
 
 def safe_filename(name: str) -> str:
     ''' A sender controls this string and it becomes part of a blob key: strip any
-    path, control characters and leading dots so `../../x` cannot climb out of raw/. '''
+    path, control characters and leading dots so `../../x` cannot climb out of raw/.
+
+    The colon has to go too. `Path("_blobs") / "raw/t/s/C:evil.pdf"` resolves to
+    `C:evil.pdf` on Windows -- a drive-relative path discards everything to its left,
+    so the bytes land outside the blob root while the DB records the key as if they
+    did not. The rest of `<>:"|?*` goes with it: illegal on NTFS, so a sender could
+    otherwise make `put` raise on every retry.
+    '''
     base = re.split(r"[\\/]", name)[-1]
-    base = re.sub(r"[\x00-\x1f]", "", base).lstrip(".").strip()
+    base = re.sub(r'[\x00-\x1f<>:"|?*]', "", base).lstrip(".").strip()
     return base[:200] or "unnamed"
 
 

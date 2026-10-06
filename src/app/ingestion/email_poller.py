@@ -6,7 +6,7 @@ import email.utils
 from typing import Iterator
 
 from imap_tools import AND, MailBox, MailMessageFlags
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.ingestion.intake import intake_bytes
@@ -49,9 +49,14 @@ def _attachments(
     payload = part.get_payload(decode=True)
     if not filename or not payload:
         return
-    # A signature logo: referenced by cid from the HTML body, never an attachment the
-    # sender meant as a document.
-    if part.get("Content-ID") and part.get_content_disposition() != "attachment":
+    # A signature logo: an image referenced by cid from the HTML body, never a document
+    # the sender meant to send. Images only -- a scanner that emails a PDF inline with a
+    # Content-ID is sending a document, and a broader rule would silently drop it.
+    if (
+        part.get_content_maintype() == "image"
+        and part.get("Content-ID")
+        and part.get_content_disposition() != "attachment"
+    ):
         return
     yield filename, payload
 
@@ -61,8 +66,13 @@ def _tenant_for(session, msg) -> Client | None:
         for _, addr in email.utils.getaddresses(msg.headers.get(header, ())):
             if not addr:
                 continue
+            # lower() on the column too: nothing stops an operator typing
+            # Intake+Acme@Example.com, and the mail would then be dropped as
+            # unroutable with only a log line to show for it.
             client = session.scalar(
-                select(Client).where(Client.intake_address == addr.lower())
+                select(Client).where(
+                    func.lower(Client.intake_address) == addr.lower()
+                )
             )
             if client is not None:
                 return client
@@ -81,7 +91,19 @@ def poll_once(session_factory) -> int:
         # UIDs are only unique within one UIDVALIDITY epoch; a rebuilt mailbox restarts
         # them, and without this a new message could collide with an old ref.
         validity = mb.folder.status(s.imap_mailbox)["UIDVALIDITY"]
-        for msg in mb.fetch(AND(seen=False), mark_seen=False, bulk=True):
+        # bulk=True holds the batch in memory, so it needs a ceiling: a backlog of
+        # thousands of unseen messages would otherwise be fetched in one go. The
+        # remainder is picked up by the next poll.
+        for msg in mb.fetch(
+            AND(seen=False), mark_seen=False, bulk=True, limit=s.imap_batch_size
+        ):
+            if msg.uid is None:
+                # Some servers return no UID. Without one there is no ref to dedupe on
+                # and no handle to flag: every such message would share the ref
+                # "<user>:<validity>:None", so the first would be ingested and the rest
+                # silently skipped as already-processed.
+                print(f"message from {msg.from_!r} has no uid, skipped")
+                continue
             ref = f"{s.imap_user}:{validity}:{msg.uid}"
             try:
                 count += _ingest(session_factory, msg, ref)
