@@ -23,6 +23,7 @@ dependencies = [
     "uvicorn[standard]>=0.52.4",
     "sentence-transformers>=6.1.0",
     "qdrant-client>=1.19.1",
+    "imap-tools>=1.15.0",
 ]
 
 
