@@ -27,8 +27,16 @@ class Point:
     payload: dict = field(default_factory=dict)
 
 
+@dataclass
+class Hit:
+    id: str
+    score: float  # cosine similarity: higher is closer
+    payload: dict
+
+
 class VectorStore(Protocol):
     def upsert(self, collection: str, points: list[Point]) -> None: ...
+    def search(self, collection: str, vector: list[float], limit: int) -> list[Hit]: ...
     def drop(self, collection: str) -> None: ...
 
 
@@ -92,6 +100,19 @@ class QdrantVectorStore:
             ],
             wait=True,  # the status flip to EMBEDDED must not outrun the write
         )
+
+    def search(self, collection: str, vector: list[float], limit: int) -> list[Hit]:
+        ''' Best first. A tenant whose first document has not reached EMBEDDED has no
+        collection yet (`_ensure` creates it on first write): that is an empty result,
+        not an error. '''
+        if not self.client.collection_exists(collection):
+            return []
+        res = self.client.query_points(
+            collection_name=collection, query=vector, limit=limit, with_payload=True
+        )
+        return [
+            Hit(id=str(p.id), score=p.score, payload=p.payload or {}) for p in res.points
+        ]
 
     def drop(self, collection: str) -> None:
         ''' Tenant offboarding and test teardown. Postgres keeps `document_pages`, so

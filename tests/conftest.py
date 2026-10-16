@@ -8,6 +8,7 @@ env = Path(__file__).resolve().parent.parent / ".env.test"
 load_dotenv(dotenv_path=env, override=True)
 
 # import pytest now
+import math  # noqa: E402
 import os  # noqa: E402
 import uuid  # noqa: E402
 
@@ -24,6 +25,8 @@ from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
 from app.processing import embed, normalize, ocr  # noqa: E402
+from app.search import retrieve  # noqa: E402
+from app.storage.vectors import Hit  # noqa: E402
 
 
 @pytest.fixture
@@ -149,6 +152,18 @@ class FakeVectorStore:
         for p in points:
             target[p.id] = p
 
+    def search(self, collection, vector, limit):
+        """Cosine, best first, like qdrant with Distance.COSINE. A missing collection
+        is an empty result, same as the real store."""
+
+        def cos(a, b):
+            norm = math.hypot(*a) * math.hypot(*b)
+            return sum(x * y for x, y in zip(a, b)) / norm if norm else 0.0
+
+        points = self.points(collection)
+        hits = [Hit(p.id, cos(vector, p.vector), p.payload) for p in points]
+        return sorted(hits, key=lambda h: h.score, reverse=True)[:limit]
+
     def drop(self, collection):
         self.collections.pop(collection, None)
 
@@ -160,6 +175,7 @@ class FakeVectorStore:
 def vectors(monkeypatch):
     store = FakeVectorStore()
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
+    monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
     return store
 
 

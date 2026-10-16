@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 # then first party(local files)
 from app.api.health import router as health_router
+from app.api.search import router as search_router
 from app.db import engine
 
 # check version match else revert to default
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
         version=__version__
     )
     app.include_router(health_router)
+    app.include_router(search_router)
     return app
 
 # ASGI entrypoint for uvicorn
