@@ -1,8 +1,11 @@
 ''' Query text -> ranked chunks for one tenant. The read side of `handle_embed`.
 
+Hybrid: the query becomes a dense vector (meaning) and a bm25 sparse vector (exact
+tokens), and the store fuses both rankings with RRF.
+
 Text and page number come from the vector payload, written at embed time for exactly
-this read. Postgres is touched once, for the filename and status, and that same query
-re-checks that every hit belongs to the caller's tenant.
+this read. Postgres is touched once, for filename, status and type, and that same
+query re-checks that every hit belongs to the caller's tenant.
 '''
 
 import uuid
@@ -12,9 +15,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.log import write_audit
-from app.enums import AuditAction, DocumentStatus
+from app.enums import AuditAction, DocumentStatus, DocumentType
 from app.models.document import Document
-from app.processing import embed
+from app.processing import bm25, embed
 from app.storage import get_vector_store
 from app.storage.vectors import tenant_collection
 
@@ -23,8 +26,9 @@ class SearchHit(BaseModel):
     document_id: uuid.UUID
     filename: str | None
     status: DocumentStatus
+    doc_type: DocumentType
     page_no: int
-    score: float
+    score: float  # RRF: rank-based, comparable within one result list only
     text: str
 
 
@@ -41,7 +45,9 @@ def search(
     # The same encode handle_embed uses: vectors from two different models are not
     # comparable, so there is exactly one place a vector can come from.
     vector = embed.encode([query])[0]
-    hits = get_vector_store().search(tenant_collection(tenant_id), vector, limit)
+    hits = get_vector_store().search(
+        tenant_collection(tenant_id), vector, bm25.encode_query(query), limit
+    )
     if not hits:
         return []
 
@@ -61,6 +67,8 @@ def search(
             document_id=doc.id,
             filename=doc.source_filename,
             status=doc.status,
+            # From Postgres, not the payload: the payload copy can lag a reclassify.
+            doc_type=doc.doc_type,
             page_no=h.payload["page_no"],
             score=h.score,
             text=h.payload["text"],

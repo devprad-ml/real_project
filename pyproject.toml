@@ -24,6 +24,7 @@ dependencies = [
     "sentence-transformers>=6.1.0",
     "qdrant-client>=1.19.1",
     "imap-tools>=1.15.0",
+    "anthropic>=1.15.0",
 ]
 
 

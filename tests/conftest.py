@@ -24,7 +24,7 @@ from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
-from app.processing import embed, normalize, ocr  # noqa: E402
+from app.processing import classify, embed, normalize, pdftext  # noqa: E402
 from app.search import retrieve  # noqa: E402
 from app.storage.vectors import Hit  # noqa: E402
 
@@ -68,7 +68,7 @@ def tenant():
     yield tenant_id
 
     with SessionLocal() as session:
-        for table in ("jobs", "document_pages", "audit_log", "documents", "sources"):
+        for table in ("jobs", "audit_log", "documents", "sources"):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
                 {"t": tenant_id},
@@ -117,6 +117,9 @@ class FakeBlobStore:
     def get(self, key):
         return self.data[key]
 
+    def delete(self, key):
+        self.data.pop(key, None)
+
     def url(self, key):
         return f"memory://{key}"
 
@@ -134,7 +137,7 @@ def fake_tools(monkeypatch):
     """Stand in for Tesseract/Ghostscript. These tests are about the state machine,
     not about whether OCR can read a fax."""
     monkeypatch.setattr(normalize, "run", lambda data: (FAKE_PDFA, len(PAGE_TEXTS)))
-    monkeypatch.setattr(ocr, "pages", lambda pdf: enumerate(PAGE_TEXTS, start=1))
+    monkeypatch.setattr(pdftext, "pages", lambda pdf: enumerate(PAGE_TEXTS, start=1))
 
 
 class FakeVectorStore:
@@ -152,16 +155,30 @@ class FakeVectorStore:
         for p in points:
             target[p.id] = p
 
-    def search(self, collection, vector, limit):
-        """Cosine, best first, like qdrant with Distance.COSINE. A missing collection
-        is an empty result, same as the real store."""
+    def search(self, collection, vector, sparse, limit):
+        """Hybrid like the real store: rank by cosine, rank by sparse dot product
+        (points with no shared term sit out that leg), fuse with RRF. A missing
+        collection is an empty result, same as the real store."""
 
         def cos(a, b):
             norm = math.hypot(*a) * math.hypot(*b)
             return sum(x * y for x, y in zip(a, b)) / norm if norm else 0.0
 
+        def dot(query, doc):
+            weights = dict(zip(*doc))
+            return sum(v * weights.get(i, 0.0) for i, v in zip(*query))
+
         points = self.points(collection)
-        hits = [Hit(p.id, cos(vector, p.vector), p.payload) for p in points]
+        dense = sorted(points, key=lambda p: cos(vector, p.vector), reverse=True)
+        matched = [p for p in points if dot(sparse, p.sparse) > 0]
+        keyword = sorted(matched, key=lambda p: dot(sparse, p.sparse), reverse=True)
+
+        scores: dict[str, float] = {}
+        for leg in (dense, keyword):
+            for rank, p in enumerate(leg[: limit * 4]):
+                scores[p.id] = scores.get(p.id, 0.0) + 1 / (60 + rank + 1)
+        by_id = {p.id: p for p in points}
+        hits = [Hit(pid, score, by_id[pid].payload) for pid, score in scores.items()]
         return sorted(hits, key=lambda h: h.score, reverse=True)[:limit]
 
     def drop(self, collection):
@@ -177,6 +194,25 @@ def vectors(monkeypatch):
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
     return store
+
+
+@pytest.fixture
+def fake_classifier(monkeypatch):
+    """No Anthropic call in any test. Records what it was shown and answers with
+    whatever `result` holds, so a test can choose the type."""
+
+    class Fake:
+        result = classify.ClassifyResult(doc_type=DocumentType.CLAIMS, confidence=0.93)
+        seen: list[str] = []
+
+        def run(self, pages):
+            self.seen.append("\n".join(pages))
+            return self.result
+
+    fake = Fake()
+    fake.seen = []
+    monkeypatch.setattr(classify, "run", fake.run)
+    return fake
 
 
 @pytest.fixture

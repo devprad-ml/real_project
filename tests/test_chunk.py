@@ -14,7 +14,7 @@ def test_short_text_is_one_chunk():
 
 
 def test_blank_and_whitespace_pages_produce_nothing():
-    # A blank sheet still has a document_pages row (page_no alignment), but there is
+    # A blank sheet still yields a page from pdftext (page_no alignment), but there is
     # nothing to embed and a zero vector is not the same as "no vector".
     assert chunk_page(2, "") == []
     assert chunk_page(2, "   \n\n  \t ") == []

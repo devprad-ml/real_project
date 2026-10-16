@@ -15,7 +15,8 @@ from app.enums import DocumentStatus, JobKind, JobState
 from app.errors import PermanentError
 from app.jobs import worker
 from app.jobs.queue import enqueue
-from app.models import Document, DocumentPages, Job
+from app.models import Document, Job
+from app.processing import pdftext
 
 
 def _seed_job(tenant, doc, kind=JobKind.NORMALIZE):
@@ -46,23 +47,39 @@ def test_run_once_drives_the_real_normalize_handler(tenant, make_doc, blob, fake
     with SessionLocal() as s:
         assert s.get(Job, job_id).state == JobState.DONE
         assert s.get(Document, doc.id).status == DocumentStatus.NORMALIZED
-    assert f"derived/{tenant}/{doc.sha256}/normalized.pdf" in blob.data
+    assert f"derived/{tenant}/{doc.id}/unknown.pdf" in blob.data
+
+
+def test_run_once_drives_the_real_classify_handler(
+    tenant, make_doc, blob, fake_tools, fake_classifier
+):
+    """The blob move deletes the old key in an after-commit hook, so the worker's own
+    commit is the one that has to trigger it."""
+    old_key = f"derived/{tenant}/x/unknown.pdf"
+    blob.data[old_key] = b"pdf"
+    doc = make_doc(status=DocumentStatus.NORMALIZED, normalized_blob_key=old_key)
+    job_id = _seed_job(tenant, doc, kind=JobKind.CLASSIFY)
+
+    assert worker.run_once() is True
+
+    with SessionLocal() as s:
+        assert s.get(Job, job_id).state == JobState.DONE
+        assert s.get(Document, doc.id).status == DocumentStatus.CLASSIFIED
+    assert f"derived/{tenant}/{doc.id}/claims.pdf" in blob.data
+    assert old_key not in blob.data
 
 
 def test_run_once_drives_the_real_embed_handler(
-    tenant, make_doc, vectors, fake_embedder
+    tenant, make_doc, blob, vectors, fake_embedder, monkeypatch
 ):
     """The last transition this phase, through the worker rather than called directly
     -- the embed handler talks to a store outside the transaction, so its wiring is
     worth proving at the dispatch level too."""
-    doc = make_doc(status=DocumentStatus.OCR_DONE)
-    with SessionLocal() as s:
-        s.add(
-            DocumentPages(
-                tenant_id=tenant, document_id=doc.id, page_no=1, ocr_text="a page"
-            )
-        )
-        s.commit()
+    blob.data["derived/x/denial.pdf"] = b"pdf"
+    monkeypatch.setattr(pdftext, "pages", lambda pdf: iter([(1, "a page")]))
+    doc = make_doc(
+        status=DocumentStatus.CLASSIFIED, normalized_blob_key="derived/x/denial.pdf"
+    )
     job_id = _seed_job(tenant, doc, kind=JobKind.EMBED)
 
     assert worker.run_once() is True

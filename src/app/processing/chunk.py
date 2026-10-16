@@ -70,6 +70,5 @@ def chunk_page(page_no: int, text: str) -> list[Chunk]:
 
 
 def chunk_pages(pages: Iterable[tuple[int, str]]) -> list[Chunk]:
-    ''' `pages` is (page_no, ocr_text) in page order. Takes tuples, not ORM rows, so
-    re-chunking for a model upgrade can read from anywhere. '''
+    ''' `pages` is (page_no, text) in page order, as `pdftext.pages` yields it. '''
     return [c for page_no, text in pages for c in chunk_page(page_no, text)]

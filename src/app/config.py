@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     blob_backend: str = "local"   # local or AWS S3
     blob_local_root: str = "./_blobs"
     anthropic_api_key: SecretStr
-    classify_model: str = "claude-sonnet-5"     # TODO: model cascade ? see design doc
+    # Cheapest current model: picking one label from a fixed list doesn't need more.
+    classify_model: str = "claude-haiku-5-5"
+    # Leading characters sent to classify; the type is almost always on page one.
+    classify_max_chars: int = Field(8000, ge=1)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
     max_attempts: int = Field(5, ge=1)
     qdrant_url: str = "http://localhost:6333"

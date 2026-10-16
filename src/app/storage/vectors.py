@@ -1,8 +1,15 @@
 ''' VectorStore Protocol: chunk embeddings, one collection per tenant.
 
 Mirrors `blob.py` deliberately -- same Protocol-plus-one-impl shape, same reason: the
-local service is the learning target and the managed one (Qdrant Cloud, Pinecone) is
-a later swap behind the same two methods.
+local service is the learning target and the managed one (Qdrant Cloud, Azure AI
+Search) is a later swap behind the same methods.
+
+Every point carries two vectors: `dense` (the embedding model, for meaning) and `bm25`
+(sparse term weights, for exact tokens). Search runs both and fuses the rankings with
+RRF, which is how Azure AI Search does hybrid search too.
+
+The collection is an index, not a source of truth: every point is rebuilt from the
+normalized PDFs in blob storage by `python -m app.jobs.reindex`.
 
 Tenant isolation is the collection name, not a payload filter. A filter is one
 forgotten `must` clause away from serving another client's chart notes; a wrong
@@ -20,23 +27,37 @@ from typing import Protocol
 POINT_NAMESPACE = uuid.UUID("6f2b0e4c-0a7d-5f3e-9c21-4b8e7a1d0c55")
 
 
+# (indices, values), as `processing.bm25` produces them.
+Sparse = tuple[list[int], list[float]]
+
+DENSE = "dense"
+SPARSE = "bm25"
+
+# Each leg fetches this many times `limit` before fusion, so a chunk ranked low by one
+# leg and high by the other still reaches the fused list.
+PREFETCH_FACTOR = 4
+
+
 @dataclass
 class Point:
     id: str
     vector: list[float]
     payload: dict = field(default_factory=dict)
+    sparse: Sparse = field(default_factory=lambda: ([], []))
 
 
 @dataclass
 class Hit:
     id: str
-    score: float  # cosine similarity: higher is closer
+    score: float  # RRF fused score: rank-based, higher is better, not a similarity
     payload: dict
 
 
 class VectorStore(Protocol):
     def upsert(self, collection: str, points: list[Point]) -> None: ...
-    def search(self, collection: str, vector: list[float], limit: int) -> list[Hit]: ...
+    def search(
+        self, collection: str, vector: list[float], sparse: Sparse, limit: int
+    ) -> list[Hit]: ...
     def drop(self, collection: str) -> None: ...
 
 
@@ -74,12 +95,22 @@ class QdrantVectorStore:
         signup -- the tenant row predates this service existing. '''
         if collection in self._ensured:
             return
-        from qdrant_client.models import Distance, VectorParams
+        from qdrant_client.models import (
+            Distance,
+            Modifier,
+            SparseVectorParams,
+            VectorParams,
+        )
 
         if not self.client.collection_exists(collection):
             self.client.create_collection(
                 collection,
-                vectors_config=VectorParams(size=self.dim, distance=Distance.COSINE),
+                vectors_config={
+                    DENSE: VectorParams(size=self.dim, distance=Distance.COSINE)
+                },
+                # IDF is computed by qdrant from this collection's own statistics, so
+                # each tenant's keyword weights come from that tenant's documents.
+                sparse_vectors_config={SPARSE: SparseVectorParams(modifier=Modifier.IDF)},
             )
         # ponytail: cached per process, so an out-of-band collection delete is not
         # noticed until restart. Drop the cache if collections start being managed
@@ -89,33 +120,57 @@ class QdrantVectorStore:
     def upsert(self, collection: str, points: list[Point]) -> None:
         if not points:
             return
-        from qdrant_client.models import PointStruct
+        from qdrant_client.models import PointStruct, SparseVector
+
+        def vectors(p: Point) -> dict:
+            v: dict = {DENSE: p.vector}
+            if p.sparse[0]:  # a chunk of pure punctuation has no terms to index
+                v[SPARSE] = SparseVector(indices=p.sparse[0], values=p.sparse[1])
+            return v
 
         self._ensure(collection)
         self.client.upsert(
             collection_name=collection,
             points=[
-                PointStruct(id=p.id, vector=p.vector, payload=p.payload)
+                PointStruct(id=p.id, vector=vectors(p), payload=p.payload)
                 for p in points
             ],
             wait=True,  # the status flip to EMBEDDED must not outrun the write
         )
 
-    def search(self, collection: str, vector: list[float], limit: int) -> list[Hit]:
-        ''' Best first. A tenant whose first document has not reached EMBEDDED has no
-        collection yet (`_ensure` creates it on first write): that is an empty result,
-        not an error. '''
+    def search(
+        self, collection: str, vector: list[float], sparse: Sparse, limit: int
+    ) -> list[Hit]:
+        ''' Hybrid, best first: dense and bm25 legs fused with RRF in one call. A
+        tenant whose first document has not reached EMBEDDED has no collection yet
+        (`_ensure` creates it on first write): that is an empty result, not an error. '''
+        from qdrant_client.models import Fusion, FusionQuery, Prefetch, SparseVector
+
         if not self.client.collection_exists(collection):
             return []
+        legs = [Prefetch(query=vector, using=DENSE, limit=limit * PREFETCH_FACTOR)]
+        if sparse[0]:  # a query of pure punctuation has no keyword leg
+            legs.append(
+                Prefetch(
+                    query=SparseVector(indices=sparse[0], values=sparse[1]),
+                    using=SPARSE,
+                    limit=limit * PREFETCH_FACTOR,
+                )
+            )
         res = self.client.query_points(
-            collection_name=collection, query=vector, limit=limit, with_payload=True
+            collection_name=collection,
+            prefetch=legs,
+            query=FusionQuery(fusion=Fusion.RRF),
+            limit=limit,
+            with_payload=True,
         )
         return [
             Hit(id=str(p.id), score=p.score, payload=p.payload or {}) for p in res.points
         ]
 
     def drop(self, collection: str) -> None:
-        ''' Tenant offboarding and test teardown. Postgres keeps `document_pages`, so
-        a dropped collection is rebuildable -- that is the point of keeping OCR text. '''
+        ''' Tenant offboarding, reindex and test teardown. Rebuildable: the text is in
+        the normalized PDFs. Dropping a collection that doesn't exist is a no-op. '''
         self._ensured.discard(collection)
-        self.client.delete_collection(collection)
+        if self.client.collection_exists(collection):
+            self.client.delete_collection(collection)

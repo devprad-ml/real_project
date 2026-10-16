@@ -10,7 +10,10 @@ import uuid
 import pytest
 
 from app.config import get_settings
+from app.processing import bm25
 from app.storage.vectors import Point, QdrantVectorStore
+
+NO_KEYWORDS = ([], [])
 
 
 @pytest.fixture
@@ -27,14 +30,19 @@ def store():
 
 
 def pt(vector, text):
-    return Point(id=str(uuid.uuid4()), vector=vector, payload={"text": text})
+    return Point(
+        id=str(uuid.uuid4()),
+        vector=vector,
+        payload={"text": text},
+        sparse=bm25.encode_doc(text),
+    )
 
 
 def test_the_nearest_point_comes_back_first_with_its_payload(store):
     s, name = store
     s.upsert(name, [pt([0.0, 1.0, 0.0], "far"), pt([1.0, 0.1, 0.0], "near")])
 
-    hits = s.search(name, [1.0, 0.0, 0.0], limit=10)
+    hits = s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=10)
 
     assert [h.payload["text"] for h in hits] == ["near", "far"]
     assert hits[0].score > hits[1].score
@@ -42,7 +50,7 @@ def test_the_nearest_point_comes_back_first_with_its_payload(store):
 
 def test_a_missing_collection_is_an_empty_result(store):
     s, name = store
-    assert s.search(name, [1.0, 0.0, 0.0], limit=5) == []
+    assert s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=5) == []
 
 
 def test_an_upsert_of_an_existing_id_overwrites(store):
@@ -53,5 +61,23 @@ def test_an_upsert_of_an_existing_id_overwrites(store):
     s.upsert(name, [Point(same_id, [1.0, 0.0, 0.0], {"text": "second"})])
 
     assert s.client.count(name).count == 1
-    [hit] = s.search(name, [1.0, 0.0, 0.0], limit=5)
+    [hit] = s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=5)
     assert hit.payload["text"] == "second"
+
+
+def test_hybrid_search_ranks_an_exact_token_match_first(store):
+    ''' The keyword leg against real qdrant: IDF from the collection, RRF fusion. The
+    dense leg alone would put "coverage" first. '''
+    s, name = store
+    s.upsert(
+        name,
+        [
+            pt([1.0, 0.0, 0.0], "member coverage was reviewed"),
+            pt([0.0, 1.0, 0.0], "appeal for member MBR-0048213"),
+            pt([0.0, 0.0, 1.0], "unrelated fax cover sheet"),
+        ],
+    )
+
+    hits = s.search(name, [1.0, 0.0, 0.0], bm25.encode_query("MBR-0048213"), limit=3)
+
+    assert hits[0].payload["text"] == "appeal for member MBR-0048213"
