@@ -7,9 +7,9 @@ import pytest
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.enums import AuditAction, DocumentStatus
+from app.enums import AuditAction, DocumentStatus, DocumentType
 from app.models.audit_log import Log
-from app.processing import embed
+from app.processing import bm25, embed
 from app.search.retrieve import search
 from app.storage.vectors import Point, point_id, tenant_collection
 
@@ -32,6 +32,7 @@ def plant(vectors, tenant):
                 Point(
                     id=point_id(document_id, page_no, idx),
                     vector=vector,
+                    sparse=bm25.encode_doc(text),
                     payload={
                         "tenant_id": str(tenant),
                         "document_id": str(document_id),
@@ -59,7 +60,7 @@ def test_hits_come_back_best_first_with_their_citation(
     db, tenant, make_doc, plant, query_encoder
 ):
     near = make_doc(DocumentStatus.EMBEDDED, source_filename="denial.pdf")
-    far = make_doc(DocumentStatus.OCR_DONE, source_filename="claim.pdf")
+    far = make_doc(DocumentStatus.CLASSIFIED, source_filename="claim.pdf")
     plant(far.id, [0.0, 1.0, 0.0], page_no=1, text="unrelated")
     plant(near.id, [0.9, 0.1, 0.0], page_no=3, text="the denial reason")
 
@@ -69,9 +70,26 @@ def test_hits_come_back_best_first_with_their_citation(
     top = hits[0]
     assert (top.filename, top.page_no, top.text) == ("denial.pdf", 3, "the denial reason")
     assert top.status == DocumentStatus.EMBEDDED
+    # The type comes from Postgres, not the payload: make_doc files everything UNKNOWN.
+    assert top.doc_type == DocumentType.UNKNOWN
     # status is returned, not filtered: a half-embedded document is still true text
-    assert hits[1].status == DocumentStatus.OCR_DONE
+    assert hits[1].status == DocumentStatus.CLASSIFIED
     assert hits[0].score > hits[1].score
+
+
+def test_an_exact_token_match_outranks_a_closer_vector(
+    db, tenant, make_doc, plant, query_encoder
+):
+    """The reason for the keyword leg. A member ID means nothing to the dense model;
+    the chunk that literally contains it must still come first."""
+    by_meaning = make_doc(DocumentStatus.EMBEDDED)
+    by_token = make_doc(DocumentStatus.EMBEDDED)
+    plant(by_meaning.id, [1.0, 0.0, 0.0], text="a member's coverage was reviewed")
+    plant(by_token.id, [0.6, 0.4, 0.0], text="member MBR-0048213 appeal received")
+
+    hits = search(db, tenant_id=tenant, query="MBR-0048213")
+
+    assert [h.document_id for h in hits] == [by_token.id, by_meaning.id]
 
 
 def test_a_tenant_with_nothing_embedded_gets_nothing(db, tenant, vectors, query_encoder):

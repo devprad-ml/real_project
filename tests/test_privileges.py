@@ -80,7 +80,7 @@ def test_app_user_can_do_what_the_worker_needs(app_user_session, tenant, make_do
     fresh = app_user_session.get(Document, doc.id)
     fresh.page_count = 3  # UPDATE on documents
     enqueue(  # INSERT on jobs
-        app_user_session, tenant_id=tenant, document_id=doc.id, kind=JobKind.OCR
+        app_user_session, tenant_id=tenant, document_id=doc.id, kind=JobKind.CLASSIFY
     )
     app_user_session.add(  # INSERT on audit_log
         Log(

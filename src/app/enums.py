@@ -14,9 +14,8 @@ class DocumentType(str, Enum):
 class DocumentStatus(str, Enum):
     RECEIVED = "RECEIVED"
     NORMALIZED = "NORMALIZED"
-    OCR_DONE = "OCR_DONE"
-    EMBEDDED = "EMBEDDED"
     CLASSIFIED = "CLASSIFIED"
+    EMBEDDED = "EMBEDDED"
     EXTRACTED = "EXTRACTED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     ASSOCIATED = "ASSOCIATED"
@@ -27,7 +26,7 @@ class DocumentStatus(str, Enum):
 
 class JobKind(str, Enum):
     NORMALIZE = "normalize"
-    OCR = "ocr"
+    CLASSIFY = "classify"
     EMBED = "embed"
 
 
