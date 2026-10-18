@@ -24,7 +24,7 @@ from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
-from app.processing import classify, embed, normalize, pdftext  # noqa: E402
+from app.processing import classify, embed, extract, normalize, pdftext  # noqa: E402
 from app.search import retrieve  # noqa: E402
 from app.storage.vectors import Hit  # noqa: E402
 
@@ -68,7 +68,7 @@ def tenant():
     yield tenant_id
 
     with SessionLocal() as session:
-        for table in ("jobs", "audit_log", "documents", "sources"):
+        for table in ("jobs", "audit_log", "extracted_fields", "documents", "sources"):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
                 {"t": tenant_id},
@@ -212,6 +212,25 @@ def fake_classifier(monkeypatch):
     fake = Fake()
     fake.seen = []
     monkeypatch.setattr(classify, "run", fake.run)
+    return fake
+
+
+@pytest.fixture
+def fake_extractor(monkeypatch):
+    """No Anthropic call in any test. Records the doc_type it was shown and answers
+    with whatever `result` holds, so a test can choose the fields and summary."""
+
+    class Fake:
+        result = extract.ExtractionResult(fields=[], summary="")
+        seen: list[tuple] = []
+
+        def run(self, doc_type, pages):
+            self.seen.append((doc_type, "\n".join(pages)))
+            return self.result
+
+    fake = Fake()
+    fake.seen = []
+    monkeypatch.setattr(extract, "run", fake.run)
     return fake
 
 

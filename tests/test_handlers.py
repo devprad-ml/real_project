@@ -12,8 +12,8 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.enums import DocumentStatus, DocumentType, JobKind, JobState
 from app.jobs import handlers
-from app.models import Document, Job, Log
-from app.processing import classify, pdftext
+from app.models import Document, ExtractedFieldRow, Job, Log
+from app.processing import classify, extract, pdftext
 
 from conftest import FAKE_PDFA
 
@@ -312,3 +312,204 @@ def test_a_failed_upsert_leaves_the_document_at_classified(
     with SessionLocal() as s:
         assert s.get(Document, doc.id).status == DocumentStatus.CLASSIFIED
         assert _logs(s, doc) == []
+
+
+def test_embed_enqueues_extract(tenant, classified_doc, vectors, fake_embedder):
+    doc = classified_doc(["a page of text"])
+
+    with SessionLocal() as s:
+        handlers.handle_embed(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        assert [j.kind for j in _jobs(s, doc)] == [JobKind.EXTRACT]
+
+
+# --- extract: EMBEDDED -> EXTRACTED or NEEDS_REVIEW ---------------------------
+
+
+@pytest.fixture
+def embedded_doc(tenant, make_doc, blob, monkeypatch):
+    """An EMBEDDED claims document whose PDF holds `texts`, one string per page."""
+
+    def _make(texts=("a page of claim text",), doc_type=DocumentType.CLAIMS, **kwargs):
+        monkeypatch.setattr(pdftext, "pages", lambda pdf: enumerate(texts, start=1))
+        doc = make_doc(
+            status=DocumentStatus.EMBEDDED, page_count=len(texts), **kwargs
+        )
+        key = f"derived/{tenant}/{doc.id}/{doc_type.value}.pdf"
+        blob.data[key] = FAKE_PDFA
+        with SessionLocal() as s:
+            fresh = s.get(Document, doc.id)
+            fresh.normalized_blob_key = key
+            fresh.doc_type = doc_type
+            fresh.classify_confidence = 0.95
+            s.commit()
+        return doc
+
+    return _make
+
+
+def test_extract_missing_fields_populate_rows_and_send_to_review(
+    embedded_doc, fake_extractor
+):
+    fake_extractor.result = extract.ExtractionResult(
+        fields=[
+            extract.ExtractedField(name="member_id", value="ABC-123", confidence=0.95)
+        ],
+        summary="A routine claim.",
+    )
+    doc = embedded_doc()
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    assert fake_extractor.seen == [(DocumentType.CLAIMS, "a page of claim text")]
+    with SessionLocal() as s:
+        fresh = s.get(Document, doc.id)
+        assert fresh.status == DocumentStatus.NEEDS_REVIEW
+        assert fresh.summary == "A routine claim."
+        rows = s.scalars(
+            select(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
+        ).all()
+        by_name = {r.name: r for r in rows}
+        assert by_name["member_id"].value == "ABC-123"
+        assert by_name["member_id"].confidence == pytest.approx(0.95)
+        # claim_number was expected but never returned: a row, not a gap, with
+        # confidence 0.0 -- missing fields are what send this document to review.
+        assert by_name["claim_number"].value is None
+        assert by_name["claim_number"].confidence == 0.0
+        [log] = _logs(s, doc)
+        assert log.detail == {"to": "NEEDS_REVIEW", "fields": 4}
+
+
+def test_extract_every_expected_field_present_and_valid_lands_at_extracted(
+    embedded_doc, fake_extractor
+):
+    fake_extractor.result = extract.ExtractionResult(
+        fields=[
+            extract.ExtractedField(name="member_id", value="ABC-123", confidence=0.95),
+            extract.ExtractedField(name="claim_number", value="C1", confidence=0.95),
+            extract.ExtractedField(
+                name="service_date", value="2026-10-01", confidence=0.95
+            ),
+            extract.ExtractedField(
+                name="billed_amount", value="120.00", confidence=0.95
+            ),
+        ],
+        summary="A routine claim.",
+    )
+    doc = embedded_doc()
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        fresh = s.get(Document, doc.id)
+        assert fresh.status == DocumentStatus.EXTRACTED
+        [log] = _logs(s, doc)
+        assert log.detail == {"to": "EXTRACTED", "fields": 4}
+
+
+def test_extract_an_invalid_field_sends_the_document_to_review(
+    embedded_doc, fake_extractor
+):
+    fake_extractor.result = extract.ExtractionResult(
+        fields=[
+            extract.ExtractedField(name="member_id", value="ABC-123", confidence=0.95),
+            extract.ExtractedField(name="claim_number", value="C1", confidence=0.95),
+            extract.ExtractedField(
+                name="service_date", value="not a real date", confidence=0.95
+            ),
+            extract.ExtractedField(
+                name="billed_amount", value="120.00", confidence=0.95
+            ),
+        ],
+        summary="A routine claim.",
+    )
+    doc = embedded_doc()
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        assert s.get(Document, doc.id).status == DocumentStatus.NEEDS_REVIEW
+
+
+def test_extract_unknown_doc_type_always_goes_to_review(embedded_doc, fake_extractor):
+    doc = embedded_doc(doc_type=DocumentType.UNKNOWN)
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        assert s.get(Document, doc.id).status == DocumentStatus.NEEDS_REVIEW
+        rows = s.scalars(
+            select(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
+        ).all()
+        assert rows == []  # UNKNOWN has no expected fields
+
+
+def test_extract_a_type_with_no_expected_fields_passes_vacuously(
+    embedded_doc, fake_extractor
+):
+    fake_extractor.result = extract.ExtractionResult(
+        fields=[], summary="A letter about a billing dispute."
+    )
+    doc = embedded_doc(doc_type=DocumentType.CORRESPONDENCE)
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        fresh = s.get(Document, doc.id)
+        assert fresh.status == DocumentStatus.EXTRACTED
+        assert fresh.summary == "A letter about a billing dispute."
+
+
+def test_extract_does_not_enqueue_any_job(tenant, embedded_doc, fake_extractor):
+    """No `associate` job here -- M9 doesn't have a handler yet, and enqueuing an
+    unregistered kind would fail a correctly-extracted document to FAILED."""
+    doc = embedded_doc()
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        assert _jobs(s, doc) == []
+
+
+def test_extract_is_a_noop_before_embed_ran(embedded_doc, fake_extractor):
+    doc = embedded_doc()
+    with SessionLocal() as s:
+        fresh = s.get(Document, doc.id)
+        fresh.status = DocumentStatus.CLASSIFIED
+        s.commit()
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    assert fake_extractor.seen == []
+    with SessionLocal() as s:
+        assert s.get(Document, doc.id).status == DocumentStatus.CLASSIFIED
+
+
+def test_extract_is_a_noop_once_already_past_embedded(embedded_doc, fake_extractor):
+    doc = embedded_doc()
+    with SessionLocal() as s:
+        fresh = s.get(Document, doc.id)
+        fresh.status = DocumentStatus.EXTRACTED
+        s.commit()
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    assert fake_extractor.seen == []
