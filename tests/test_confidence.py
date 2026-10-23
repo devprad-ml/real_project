@@ -43,34 +43,36 @@ def test_a_bogus_date_fails_its_validator():
     assert confidence.score("service_date", "not a date", 0.8) == 0.0
 
 
-# --- all_ok: the gate -----------------------------------------------------------
+# --- review_reasons: the gate -------------------------------------------------
 
 
 def test_unknown_doc_type_always_fails_the_gate():
     doc = _doc(DocumentType.UNKNOWN, 1.0)
-    assert confidence.all_ok(doc, []) is False
+    assert confidence.review_reasons(doc, []) == ["doc_type_unknown"]
 
 
 def test_low_classify_confidence_fails_the_gate_even_with_perfect_fields():
     doc = _doc(DocumentType.CLAIMS, 0.5)
     fields = [_field("member_id", "ABC-123", 1.0)]
-    assert confidence.all_ok(doc, fields) is False
+    assert confidence.review_reasons(doc, fields) == ["classify_low_confidence"]
 
 
-def test_one_low_confidence_field_fails_the_whole_gate():
+def test_each_low_confidence_field_is_named():
     doc = _doc(DocumentType.CLAIMS, 0.95)
     fields = [_field("member_id", "ABC-123", 0.95), _field("claim_number", None, 0.0)]
-    assert confidence.all_ok(doc, fields) is False
+    assert confidence.review_reasons(doc, fields) == [
+        "field_low_confidence:claim_number"
+    ]
 
 
 def test_every_field_above_threshold_passes_the_gate():
     doc = _doc(DocumentType.CLAIMS, 0.95)
     fields = [_field("member_id", "ABC-123", 0.95), _field("claim_number", "C1", 0.9)]
-    assert confidence.all_ok(doc, fields) is True
+    assert confidence.review_reasons(doc, fields) == []
 
 
 def test_an_empty_fields_list_passes_vacuously():
-    """correspondence and unknown have nothing to extract -- there is nothing to
-    doubt, so a confident classification alone is enough."""
+    """correspondence has nothing to extract -- there is nothing to doubt, so a
+    confident classification alone is enough."""
     doc = _doc(DocumentType.CORRESPONDENCE, 0.9)
-    assert confidence.all_ok(doc, []) is True
+    assert confidence.review_reasons(doc, []) == []

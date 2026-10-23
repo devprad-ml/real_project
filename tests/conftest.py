@@ -10,6 +10,7 @@ load_dotenv(dotenv_path=env, override=True)
 # import pytest now
 import math  # noqa: E402
 import os  # noqa: E402
+import types  # noqa: E402
 import uuid  # noqa: E402
 
 import pytest  # noqa: E402
@@ -24,7 +25,7 @@ from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
-from app.processing import classify, embed, extract, normalize, pdftext  # noqa: E402
+from app.processing import classify, embed, extract, llm, normalize, pdftext  # noqa: E402
 from app.search import retrieve  # noqa: E402
 from app.storage.vectors import Hit  # noqa: E402
 
@@ -194,6 +195,34 @@ def vectors(monkeypatch):
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
     return store
+
+
+class FakeMessages:
+    """`client.messages` with only `parse`. Records every call's kwargs."""
+
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.calls = []
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return self.response
+
+
+@pytest.fixture
+def fake_api(monkeypatch):
+    """Replaces the shared Anthropic client. No test calls the real API."""
+
+    def _install(response=None, error=None):
+        messages = FakeMessages(response, error)
+        fake = types.SimpleNamespace(messages=messages)
+        monkeypatch.setattr(llm, "client", lambda: fake)
+        return messages
+
+    return _install
 
 
 @pytest.fixture

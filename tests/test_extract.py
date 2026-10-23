@@ -12,31 +12,6 @@ from app.errors import PermanentError
 from app.processing import extract
 
 
-class FakeMessages:
-    def __init__(self, response=None, error=None):
-        self.response = response
-        self.error = error
-        self.calls = []
-
-    def parse(self, **kwargs):
-        self.calls.append(kwargs)
-        if self.error:
-            raise self.error
-        return self.response
-
-
-@pytest.fixture
-def fake_api(monkeypatch):
-    def _install(response=None, error=None):
-        messages = FakeMessages(response, error)
-        monkeypatch.setattr(
-            extract, "_client", lambda: types.SimpleNamespace(messages=messages)
-        )
-        return messages
-
-    return _install
-
-
 def reply(fields, summary, stop_reason="end_turn"):
     parsed = extract.ExtractionResult(
         fields=[extract.ExtractedField(**f) for f in fields], summary=summary
@@ -64,40 +39,26 @@ def test_sends_the_expected_field_list_and_returns_fields_plus_summary(fake_api)
     assert "member_id" in sent and "claim_number" in sent
 
 
-def test_an_invented_field_name_is_dropped(fake_api):
-    """Storing a name the schema never promised is worse than losing one field."""
-    fake_api(
-        reply(
-            [
-                {"name": "member_id", "value": "ABC-123", "confidence": 0.9},
-                {"name": "made_up_field", "value": "x", "confidence": 0.9},
-            ],
-            "summary",
-        )
-    )
+def test_sends_only_the_head_of_a_long_document(fake_api):
+    api = fake_api(reply([], "s"))
+    limit = get_settings().extract_max_chars
 
-    result = extract.run(DocumentType.CLAIMS, ["text"])
+    extract.run(DocumentType.CLAIMS, ["a" * limit, "never read"])
 
-    assert [f.name for f in result.fields] == ["member_id"]
+    assert "never read" not in api.calls[0]["messages"][0]["content"]
 
 
 def test_a_blank_document_is_empty_without_an_api_call(fake_api):
-    api = fake_api(
-        reply([{"name": "member_id", "value": "x", "confidence": 1.0}], "s")
-    )
+    api = fake_api(reply([{"name": "member_id", "value": "x", "confidence": 1.0}], "s"))
     assert extract.run(DocumentType.CLAIMS, ["", "  \n "]) == extract.EMPTY
     assert api.calls == []
 
 
-def test_a_refusal_is_empty_not_a_failure(fake_api):
-    fake_api(
-        reply(
-            [{"name": "member_id", "value": "x", "confidence": 0.9}],
-            "s",
-            stop_reason="refusal",
-        )
-    )
-    assert extract.run(DocumentType.CLAIMS, ["some document text"]) == extract.EMPTY
+def test_a_refusal_is_none_not_empty_and_not_a_failure(fake_api):
+    """None, not EMPTY: a blank page and a document Claude would not read are
+    different outcomes, and only the second one needs a human."""
+    fake_api(reply([], "s", stop_reason="refusal"))
+    assert extract.run(DocumentType.CLAIMS, ["some document text"]) is None
 
 
 def test_confidence_is_clamped_to_0_1(fake_api):
@@ -121,13 +82,10 @@ def test_a_rejected_request_is_permanent(fake_api):
 
 
 def test_a_type_with_no_expected_fields_still_gets_a_summary(fake_api):
-    """correspondence has nothing to name in advance, but a summary is still
-    useful -- the call is still made, just with an empty field list expected."""
     api = fake_api(reply([], "A letter about a billing dispute."))
 
     result = extract.run(DocumentType.CORRESPONDENCE, ["dear sir or madam..."])
 
     assert result.fields == []
     assert result.summary == "A letter about a billing dispute."
-    [call] = api.calls
-    assert "none" in call["messages"][0]["content"].lower()
+    assert "none" in api.calls[0]["messages"][0]["content"].lower()

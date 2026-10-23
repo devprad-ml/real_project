@@ -8,6 +8,7 @@ ends up -- not about whether Tesseract can read a fax.
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.db import SessionLocal
 from app.enums import DocumentStatus, DocumentType, JobKind, JobState
@@ -332,11 +333,9 @@ def test_embed_enqueues_extract(tenant, classified_doc, vectors, fake_embedder):
 def embedded_doc(tenant, make_doc, blob, monkeypatch):
     """An EMBEDDED claims document whose PDF holds `texts`, one string per page."""
 
-    def _make(texts=("a page of claim text",), doc_type=DocumentType.CLAIMS, **kwargs):
+    def _make(texts=("a page of claim text",), doc_type=DocumentType.CLAIMS):
         monkeypatch.setattr(pdftext, "pages", lambda pdf: enumerate(texts, start=1))
-        doc = make_doc(
-            status=DocumentStatus.EMBEDDED, page_count=len(texts), **kwargs
-        )
+        doc = make_doc(status=DocumentStatus.EMBEDDED, page_count=len(texts))
         key = f"derived/{tenant}/{doc.id}/{doc_type.value}.pdf"
         blob.data[key] = FAKE_PDFA
         with SessionLocal() as s:
@@ -381,7 +380,15 @@ def test_extract_missing_fields_populate_rows_and_send_to_review(
         assert by_name["claim_number"].value is None
         assert by_name["claim_number"].confidence == 0.0
         [log] = _logs(s, doc)
-        assert log.detail == {"to": "NEEDS_REVIEW", "fields": 4}
+        assert log.detail == {
+            "to": "NEEDS_REVIEW",
+            "fields": 4,
+            "reasons": [
+                "field_low_confidence:claim_number",
+                "field_low_confidence:service_date",
+                "field_low_confidence:billed_amount",
+            ],
+        }
 
 
 def test_extract_every_expected_field_present_and_valid_lands_at_extracted(
@@ -410,7 +417,7 @@ def test_extract_every_expected_field_present_and_valid_lands_at_extracted(
         fresh = s.get(Document, doc.id)
         assert fresh.status == DocumentStatus.EXTRACTED
         [log] = _logs(s, doc)
-        assert log.detail == {"to": "EXTRACTED", "fields": 4}
+        assert log.detail == {"to": "EXTRACTED", "fields": 4, "reasons": []}
 
 
 def test_extract_an_invalid_field_sends_the_document_to_review(
@@ -470,6 +477,57 @@ def test_extract_a_type_with_no_expected_fields_passes_vacuously(
         fresh = s.get(Document, doc.id)
         assert fresh.status == DocumentStatus.EXTRACTED
         assert fresh.summary == "A letter about a billing dispute."
+
+
+def test_a_refused_extraction_goes_to_review_even_with_no_expected_fields(
+    embedded_doc, fake_extractor
+):
+    """With no expected fields, an empty field list would pass the gate -- a refusal
+    must not ride that through to EXTRACTED with a blank summary."""
+    fake_extractor.result = None
+    doc = embedded_doc(doc_type=DocumentType.CORRESPONDENCE)
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        fresh = s.get(Document, doc.id)
+        assert fresh.status == DocumentStatus.NEEDS_REVIEW
+        assert fresh.summary is None
+        assert _logs(s, doc)[0].detail["reasons"] == ["extract_refused"]
+
+
+def test_an_invented_field_name_is_never_stored(embedded_doc, fake_extractor):
+    fake_extractor.result = extract.ExtractionResult(
+        fields=[extract.ExtractedField(name="made_up", value="x", confidence=0.99)],
+        summary="s",
+    )
+    doc = embedded_doc(doc_type=DocumentType.CONSENT)
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        names = s.scalars(
+            select(ExtractedFieldRow.name).where(ExtractedFieldRow.document_id == doc.id)
+        ).all()
+        assert sorted(names) == ["member_id", "signed_date"]
+
+
+def test_the_database_refuses_a_second_row_for_the_same_field(tenant, make_doc):
+    doc = make_doc()
+    with SessionLocal() as s:
+        for _ in range(2):
+            s.add(
+                ExtractedFieldRow(
+                    tenant_id=tenant, document_id=doc.id, name="member_id",
+                    value="A1", confidence=0.9,
+                )
+            )
+        with pytest.raises(IntegrityError):
+            s.commit()
 
 
 def test_extract_does_not_enqueue_any_job(tenant, embedded_doc, fake_extractor):

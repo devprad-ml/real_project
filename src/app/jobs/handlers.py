@@ -170,29 +170,30 @@ def handle_extract(session: Session, doc: Document) -> None:
 
     pdfa = get_blob_store().get(doc.normalized_blob_key)
     result = extract.run(doc.doc_type, (text for _, text in pdftext.pages(pdfa)))
-    found = {f.name: f for f in result.fields}
+    # Only schema names are stored, so a name Claude invented never reaches the DB.
+    found = {f.name: f for f in result.fields} if result else {}
 
-    rows = [
-        ExtractedFieldRow(
-            tenant_id=doc.tenant_id,
-            document_id=doc.id,
-            name=name,
-            value=found[name].value if name in found else None,
-            confidence=confidence.score(
-                name,
-                found[name].value if name in found else None,
-                found[name].confidence if name in found else 0.0,
-            ),
+    rows = []
+    for name in extract.FIELD_SCHEMAS.get(doc.doc_type, []):
+        f = found.get(name)
+        value = f.value if f else None
+        rows.append(
+            ExtractedFieldRow(
+                tenant_id=doc.tenant_id,
+                document_id=doc.id,
+                name=name,
+                value=value,
+                confidence=confidence.score(name, value, f.confidence if f else 0.0),
+            )
         )
-        for name in extract.FIELD_SCHEMAS.get(doc.doc_type, [])
-    ]
     session.add_all(rows)
-    doc.summary = result.summary
-    doc.status = (
-        DocumentStatus.EXTRACTED
-        if confidence.all_ok(doc, rows)
-        else DocumentStatus.NEEDS_REVIEW
-    )
+
+    reasons = confidence.review_reasons(doc, rows)
+    if result is None:
+        reasons.insert(0, "extract_refused")
+    else:
+        doc.summary = result.summary
+    doc.status = DocumentStatus.NEEDS_REVIEW if reasons else DocumentStatus.EXTRACTED
 
     write_audit(
         session,
@@ -200,7 +201,7 @@ def handle_extract(session: Session, doc: Document) -> None:
         document_id=doc.id,
         actor="system",
         action=AuditAction.STATE_CHANGE,
-        detail={"to": doc.status.value, "fields": len(rows)},
+        detail={"to": doc.status.value, "fields": len(rows), "reasons": reasons},
     )
 
 

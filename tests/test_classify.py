@@ -12,31 +12,6 @@ from app.errors import PermanentError
 from app.processing import classify
 
 
-class FakeMessages:
-    def __init__(self, response=None, error=None):
-        self.response = response
-        self.error = error
-        self.calls = []
-
-    def parse(self, **kwargs):
-        self.calls.append(kwargs)
-        if self.error:
-            raise self.error
-        return self.response
-
-
-@pytest.fixture
-def fake_api(monkeypatch):
-    def _install(response=None, error=None):
-        messages = FakeMessages(response, error)
-        monkeypatch.setattr(
-            classify, "_client", lambda: types.SimpleNamespace(messages=messages)
-        )
-        return messages
-
-    return _install
-
-
 def reply(doc_type, confidence, stop_reason="end_turn"):
     parsed = classify.ClassifyResult(doc_type=doc_type, confidence=confidence)
     return types.SimpleNamespace(stop_reason=stop_reason, parsed_output=parsed)

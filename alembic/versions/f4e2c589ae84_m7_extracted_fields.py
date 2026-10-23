@@ -4,10 +4,7 @@ Revision ID: f4e2c589ae84
 Revises: b6e1f0c3a812
 Create Date: 2026-10-17
 
-No data migration needed: every existing document is at CLASSIFIED or EMBEDDED at
-the latest (M7 did not exist when they were processed), so the new EXTRACT job
-reaches them in the ordinary course of the pipeline once handle_embed starts
-enqueueing it -- nothing here needs to backfill rows or rewind statuses.
+Documents already EMBEDDED when this ran get their extract jobs from 7ab04fb52bf7.
 """
 from typing import Sequence, Union
 

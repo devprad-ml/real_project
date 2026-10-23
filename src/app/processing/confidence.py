@@ -48,18 +48,18 @@ def score(name: str, value: str | None, confidence: float) -> float:
     return confidence if validator(value) else 0.0
 
 
-def all_ok(doc: Document, fields: list[ExtractedFieldRow]) -> bool:
-    ''' The gate: True keeps the document at EXTRACTED, False sends it to
-    NEEDS_REVIEW. Doesn't re-score classification -- a doc type M6 wasn't sure
-    about is never trusted here even if every individual field happens to
-    validate. An empty `fields` list passes vacuously: nothing was extracted to
-    doubt. '''
-    settings = get_settings()
+def review_reasons(doc: Document, fields: list[ExtractedFieldRow]) -> list[str]:
+    ''' The gate. Empty list keeps the document at EXTRACTED; anything else sends it
+    to NEEDS_REVIEW and is what the reviewer is shown. A doc type classify wasn't
+    sure about is never trusted here even if every field validates. An empty
+    `fields` list adds no reasons: nothing was extracted to doubt. '''
+    threshold = get_settings().confidence_threshold
+    reasons = []
     if doc.doc_type is DocumentType.UNKNOWN:
-        return False
-    if (
-        doc.classify_confidence is None
-        or doc.classify_confidence < settings.confidence_threshold
-    ):
-        return False
-    return all(f.confidence >= settings.confidence_threshold for f in fields)
+        reasons.append("doc_type_unknown")
+    elif doc.classify_confidence is None or doc.classify_confidence < threshold:
+        reasons.append("classify_low_confidence")
+    reasons += [
+        f"field_low_confidence:{f.name}" for f in fields if f.confidence < threshold
+    ]
+    return reasons
