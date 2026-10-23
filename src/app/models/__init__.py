@@ -4,5 +4,6 @@ from app.models.audit_log import Log
 from app.models.document import Document
 from app.models.client import Client
 from app.models.job import Job
+from app.models.extracted_field import ExtractedFieldRow
 
-__all__ = ["Base", "Src", "Log", "Document", "Client", "Job"]
+__all__ = ["Base", "Src", "Log", "Document", "Client", "Job", "ExtractedFieldRow"]

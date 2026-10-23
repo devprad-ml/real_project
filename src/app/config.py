@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     classify_model: str = "claude-haiku-5-5"
     # Leading characters sent to classify; the type is almost always on page one.
     classify_max_chars: int = Field(8000, ge=1)
+    # Extraction has to hold several named fields plus a summary in mind at once --
+    # real reading comprehension, not a single-label pick. Open to revisiting against
+    # Haiku once accuracy is measured on real documents.
+    extract_model: str = "claude-sonnet-5-5"
+    # A field can be on any page, so extraction needs more of the document than
+    # classify did.
+    extract_max_chars: int = Field(20000, ge=1)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
     max_attempts: int = Field(5, ge=1)
     qdrant_url: str = "http://localhost:6333"

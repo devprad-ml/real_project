@@ -28,6 +28,7 @@ class JobKind(str, Enum):
     NORMALIZE = "normalize"
     CLASSIFY = "classify"
     EMBED = "embed"
+    EXTRACT = "extract"
 
 
 class JobState(str, Enum):

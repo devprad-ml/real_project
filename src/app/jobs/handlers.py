@@ -5,7 +5,8 @@ at-least-once design safe: a job replayed after a crash, a duplicate delivery, o
 stale sweep finds the document already past that state and returns without doing
 anything. Remove the guard and a retry doubles the side effect.
 
-RECEIVED -normalize-> NORMALIZED -classify-> CLASSIFIED -embed-> EMBEDDED
+RECEIVED -normalize-> NORMALIZED -classify-> CLASSIFIED -embed-> EMBEDDED -extract->
+EXTRACTED (or NEEDS_REVIEW, decided by the confidence gate inside handle_extract)
 '''
 
 from sqlalchemy.orm import Session
@@ -14,7 +15,9 @@ from app.audit.log import write_audit
 from app.enums import AuditAction, DocumentStatus, JobKind
 from app.jobs.queue import enqueue
 from app.models.document import Document
-from app.processing import bm25, chunk, classify, embed, normalize, pdftext
+from app.models.extracted_field import ExtractedFieldRow
+from app.processing import bm25, chunk, classify, confidence, embed, extract
+from app.processing import normalize, pdftext
 from app.storage import get_blob_store, get_vector_store
 from app.storage.blob import delete_after_commit, normalized_key
 from app.storage.vectors import Point, point_id, tenant_collection
@@ -153,10 +156,58 @@ def handle_embed(session: Session, doc: Document) -> None:
         action=AuditAction.STATE_CHANGE,
         detail={"to": "EMBEDDED", "chunks": count},
     )
+    enqueue(session, tenant_id=doc.tenant_id, document_id=doc.id, kind=JobKind.EXTRACT)
+
+
+def handle_extract(session: Session, doc: Document) -> None:
+    ''' The confidence gate lives here, not in a separate job: no second Claude call
+    to replay separately, and no `associate` job enqueued -- M9 doesn't have a
+    handler for it yet, and an unregistered kind would fail a correctly-extracted
+    document straight to FAILED. A document that passes the gate just stays at
+    EXTRACTED; M9 will scan for that status directly. '''
+    if doc.status != DocumentStatus.EMBEDDED:
+        return
+
+    pdfa = get_blob_store().get(doc.normalized_blob_key)
+    result = extract.run(doc.doc_type, (text for _, text in pdftext.pages(pdfa)))
+    # Only schema names are stored, so a name Claude invented never reaches the DB.
+    found = {f.name: f for f in result.fields} if result else {}
+
+    rows = []
+    for name in extract.FIELD_SCHEMAS.get(doc.doc_type, []):
+        f = found.get(name)
+        value = f.value if f else None
+        rows.append(
+            ExtractedFieldRow(
+                tenant_id=doc.tenant_id,
+                document_id=doc.id,
+                name=name,
+                value=value,
+                confidence=confidence.score(name, value, f.confidence if f else 0.0),
+            )
+        )
+    session.add_all(rows)
+
+    reasons = confidence.review_reasons(doc, rows)
+    if result is None:
+        reasons.insert(0, "extract_refused")
+    else:
+        doc.summary = result.summary
+    doc.status = DocumentStatus.NEEDS_REVIEW if reasons else DocumentStatus.EXTRACTED
+
+    write_audit(
+        session,
+        tenant_id=doc.tenant_id,
+        document_id=doc.id,
+        actor="system",
+        action=AuditAction.STATE_CHANGE,
+        detail={"to": doc.status.value, "fields": len(rows), "reasons": reasons},
+    )
 
 
 HANDLERS = {
     JobKind.NORMALIZE: handle_normalize,
     JobKind.CLASSIFY: handle_classify,
     JobKind.EMBED: handle_embed,
+    JobKind.EXTRACT: handle_extract,
 }

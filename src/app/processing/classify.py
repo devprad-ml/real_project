@@ -7,7 +7,6 @@ output schema is the `DocumentType` enum, and the model cannot invent a type.
 PHI leaves the boundary on every call. Production needs a BAA with Anthropic.
 '''
 
-from functools import lru_cache
 from typing import Iterable
 
 import anthropic
@@ -16,6 +15,7 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.enums import DocumentType
 from app.errors import PermanentError
+from app.processing import llm
 
 SYSTEM = (
     "You classify healthcare and insurance operational documents received by a health "
@@ -33,36 +33,16 @@ class ClassifyResult(BaseModel):
 UNCLASSIFIED = ClassifyResult(doc_type=DocumentType.UNKNOWN, confidence=0.0)
 
 
-@lru_cache
-def _client() -> anthropic.Anthropic:
-    # SDK retries 429/5xx/connection errors itself (2 retries); past that the job
-    # queue's backoff takes over.
-    key = get_settings().anthropic_api_key.get_secret_value()
-    return anthropic.Anthropic(api_key=key)
-
-
-def _head(pages: Iterable[str], limit: int) -> str:
-    ''' Leading text up to `limit` chars. A document announces its type on page one;
-    stopping early keeps a 500-page record from costing 500 pages of tokens. '''
-    parts: list[str] = []
-    size = 0
-    for text in pages:
-        parts.append(text)
-        size += len(text)
-        if size >= limit:
-            break
-    return "\n\n".join(parts)[:limit].strip()
-
-
 def run(pages: Iterable[str]) -> ClassifyResult:
-    ''' `pages` is page text in order, consumed lazily. '''
+    ''' `pages` is page text in order, consumed lazily. A document announces its type
+    on page one, so only the head is sent. '''
     s = get_settings()
-    text = _head(pages, s.classify_max_chars)
+    text = llm.head(pages, s.classify_max_chars)
     if not text:
         return UNCLASSIFIED  # blank fax: nothing to send, and nothing to pay for
 
     try:
-        response = _client().messages.parse(
+        response = llm.client().messages.parse(
             model=s.classify_model,
             max_tokens=256,
             # One label from a fixed list; thinking would only add latency and cost.
