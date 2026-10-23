@@ -51,3 +51,8 @@ class AuditAction(str, Enum):
 
 
 
+
+
+class Role(str, Enum):
+    REVIEWER = "reviewer"
+    ADMIN = "admin"  # passes every role check

@@ -133,13 +133,12 @@ def test_one_view_row_per_document_not_per_chunk(
 
 
 def test_the_endpoint_returns_hits_and_commits_the_audit(
-    client, tenant, make_doc, plant, query_encoder
+    client, tenant, staff, make_doc, plant, query_encoder
 ):
     doc = make_doc(DocumentStatus.EMBEDDED, source_filename="appeal.pdf")
     plant(doc.id, [1.0, 0.0, 0.0], page_no=2, text="appeal granted")
 
-    headers = {"X-Tenant-Id": str(tenant)}
-    r = client.get("/search", params={"q": "appeal"}, headers=headers)
+    r = client.get("/search", params={"q": "appeal"}, headers=staff())
 
     assert r.status_code == 200
     [hit] = r.json()
@@ -150,24 +149,35 @@ def test_the_endpoint_returns_hits_and_commits_the_audit(
         "appeal granted",
     )
     # read from a fresh session: proves the endpoint committed, not just staged
-    assert [v.document_id for v in views(tenant)] == [doc.id]
+    [view] = views(tenant)
+    assert view.document_id == doc.id
+    assert view.actor.startswith("user:")
 
 
-def test_an_unknown_tenant_is_a_404(client, vectors, query_encoder):
-    headers = {"X-Tenant-Id": str(uuid.uuid4())}
+def test_the_tenant_comes_from_the_key_not_a_header(
+    client, tenant, staff, make_doc, plant, query_encoder
+):
+    """The old trusted X-Tenant-Id header is ignored: a key only ever searches its
+    own tenant's collection."""
+    doc = make_doc(DocumentStatus.EMBEDDED)
+    plant(doc.id, [1.0, 0.0, 0.0])
+    headers = {**staff(), "X-Tenant-Id": str(uuid.uuid4())}
+
     r = client.get("/search", params={"q": "x"}, headers=headers)
-    assert r.status_code == 404
+
+    assert [h["document_id"] for h in r.json()] == [str(doc.id)]
+
+
+def test_no_key_is_a_401(client, vectors, query_encoder):
+    assert client.get("/search", params={"q": "x"}).status_code == 401
 
 
 @pytest.mark.parametrize(
-    "params, headers",
+    "params",
     [
-        ({"q": "x"}, {}),  # no tenant header
-        ({"q": "x"}, {"X-Tenant-Id": "not-a-uuid"}),
-        ({"q": ""}, None),  # empty query
-        ({"q": "x", "limit": 51}, None),  # over the cap
+        {"q": ""},  # empty query
+        {"q": "x", "limit": 51},  # over the cap
     ],
 )
-def test_bad_input_is_a_422(client, tenant, vectors, query_encoder, params, headers):
-    headers = {"X-Tenant-Id": str(tenant)} if headers is None else headers
-    assert client.get("/search", params=params, headers=headers).status_code == 422
+def test_bad_input_is_a_422(client, staff, vectors, query_encoder, params):
+    assert client.get("/search", params=params, headers=staff()).status_code == 422

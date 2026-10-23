@@ -18,8 +18,8 @@ from app.models.document import Document
 from app.models.extracted_field import ExtractedFieldRow
 from app.processing import bm25, chunk, classify, confidence, embed, extract
 from app.processing import normalize, pdftext
-from app.storage import get_blob_store, get_vector_store
-from app.storage.blob import delete_after_commit, normalized_key
+from app.storage import get_blob_store, get_vector_store, move_normalized
+from app.storage.blob import normalized_key
 from app.storage.vectors import Point, point_id, tenant_collection
 
 
@@ -54,20 +54,6 @@ def handle_normalize(session: Session, doc: Document) -> None:
     enqueue(session, tenant_id=doc.tenant_id, document_id=doc.id, kind=JobKind.CLASSIFY)
 
 
-def _move_normalized(session: Session, doc: Document, pdfa: bytes) -> None:
-    ''' Re-file the normalized PDF under its current `doc_type`. Write the new key,
-    point the row at it, and delete the old key only once the row change commits: a
-    crash at any step leaves the row pointing at a blob that exists. '''
-    old = doc.normalized_blob_key
-    new = normalized_key(doc.tenant_id, doc.id, doc.doc_type)
-    if new == old:
-        return
-    blob = get_blob_store()
-    blob.put(new, pdfa, "application/pdf")
-    doc.normalized_blob_key = new
-    delete_after_commit(session, blob, old)
-
-
 def handle_classify(session: Session, doc: Document) -> None:
     if doc.status != DocumentStatus.NORMALIZED:
         return
@@ -79,7 +65,7 @@ def handle_classify(session: Session, doc: Document) -> None:
     # Recorded, not acted on: the confidence gate that sends a document to review
     # arrives with extract (M7) and looks at this together with the field scores.
     doc.classify_confidence = result.confidence
-    _move_normalized(session, doc, pdfa)
+    move_normalized(session, doc, pdfa)
     doc.status = DocumentStatus.CLASSIFIED
 
     write_audit(
