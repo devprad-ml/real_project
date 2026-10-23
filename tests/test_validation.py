@@ -147,6 +147,32 @@ def test_resolve_corrects_confirms_and_clears_the_document(client, reviewer, in_
     }
 
 
+def _jobs(doc_id):
+    with SessionLocal() as s:
+        return [j.kind for j in s.scalars(select(Job).where(Job.document_id == doc_id))]
+
+
+def test_resolve_sends_the_document_on_to_associate(client, reviewer, in_review):
+    doc = in_review(fields=CLAIM_FIELDS)
+    client.post(f"/validation/{doc.id}/resolve", json={}, headers=reviewer)
+    assert _jobs(doc.id) == [JobKind.ASSOCIATE]
+
+
+def test_no_mpi_match_skips_matching_and_routes_unbound(client, reviewer, in_review):
+    """A new enrollee not in the MPI yet: matching would only send it back here."""
+    doc = in_review(fields=CLAIM_FIELDS, reasons=["member_not_found"])
+
+    r = client.post(
+        f"/validation/{doc.id}/resolve", json={"no_mpi_match": True}, headers=reviewer
+    )
+
+    assert r.status_code == 204
+    after, _, audit = fresh(doc.id)
+    assert after.status == DocumentStatus.ASSOCIATED
+    assert audit.detail == {"to": "ASSOCIATED", "changed": {}, "no_mpi_match": True}
+    assert _jobs(doc.id) == [JobKind.ROUTE]
+
+
 def test_a_second_resolve_is_a_409(client, reviewer, in_review):
     doc = in_review(fields=CLAIM_FIELDS)
     url = f"/validation/{doc.id}/resolve"

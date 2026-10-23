@@ -7,7 +7,7 @@ and raise InsufficientPrivilege in the worker.
 
 These tests connect as `app_user` -- the role the API and worker actually run as --
 and assert the controls still exist. They are the only coverage the grant migrations
-(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2) have.
+(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2, d8a4f2c6e913) have.
 """
 
 import pytest
@@ -19,7 +19,10 @@ from app.db import SessionLocal
 from app.deps import hash_key
 from app.enums import AuditAction, JobKind, JobState, Role
 from app.jobs.queue import enqueue
-from app.models import ApiKey, Document, ExtractedFieldRow, Job, Log, Principal, RoleGrant
+from app.models import (
+    ApiKey, Association, Document, ExtractedFieldRow, Job, Log, Member, Principal,
+    RoleGrant,
+)
 
 
 def test_connected_as_the_application_role(app_user_session):
@@ -157,3 +160,25 @@ def test_app_user_can_delete_extracted_fields(app_user_session, tenant, make_doc
         delete(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
     )
     app_user_session.commit()
+
+
+def test_app_user_can_load_members_and_bind_documents(app_user_session, tenant, make_doc):
+    """The CSV loader upserts members; the worker inserts associations."""
+    doc = make_doc()
+    m = Member(tenant_id=tenant, member_id="A1")
+    app_user_session.add(m)
+    app_user_session.flush()
+    m.first_name = "Ann"
+    app_user_session.add(
+        Association(
+            tenant_id=tenant, document_id=doc.id, member_pk=m.id, match_confidence=1.0
+        )
+    )
+    app_user_session.commit()
+
+
+@pytest.mark.parametrize("table", ["members", "associations"])
+def test_members_and_associations_reject_deletes(app_user_session, tenant, table):
+    """A member a document was bound to must outlive the export that drops them."""
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        app_user_session.execute(text(f"DELETE FROM {table}"))  # noqa: S608

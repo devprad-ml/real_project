@@ -109,17 +109,21 @@ async function show(id) {
     return el("tr", {}, el("td", { textContent: f.name }), el("td", {}, input), conf);
   });
 
-  const resolveBtn = el("button", { textContent: "Resolve" });
-  resolveBtn.onclick = async () => {
+  const resolve = async (no_mpi_match) => {
     const fields = {};
     document.querySelectorAll("#detail input[data-name]").forEach((i) => {
       fields[i.dataset.name] = i.value.trim() || null;
     });
     try {
-      await api(`/validation/${id}/resolve`, { method: "POST", body: JSON.stringify({ fields }) });
+      await api(`/validation/${id}/resolve`, { method: "POST", body: JSON.stringify({ fields, no_mpi_match }) });
       load();
     } catch (e) { msg.textContent = e.message; }
   };
+  const resolveBtn = el("button", { textContent: "Resolve" });
+  resolveBtn.onclick = () => resolve(false);
+  // Shown only when matching sent it here: the member is not in the MPI yet.
+  const noMatchBtn = el("button", { className: "ghost", textContent: "Resolve: not in MPI" });
+  noMatchBtn.onclick = () => resolve(true);
 
   const typeSel = el("select", {}, ...TYPES.map((t) => el("option", { value: t, textContent: t, selected: t === d.doc_type })));
   const reclassBtn = el("button", { className: "ghost", textContent: "Reclassify" });
@@ -138,7 +142,9 @@ async function show(id) {
       el("div", {}, ...d.reasons.map((r) => el("span", { className: "reason", textContent: r })))),
     el("p", { textContent: d.summary || "No summary.", className: d.summary ? "" : "muted", style: "margin:0" }),
     d.fields.length ? el("table", {}, ...rows) : el("p", { className: "muted", textContent: "No fields for this type." }),
-    el("div", { className: "row" }, resolveBtn, el("span", { className: "muted", textContent: "or" }), typeSel, reclassBtn),
+    el("div", { className: "row" }, resolveBtn,
+      ...(d.reasons.includes("member_not_found") ? [noMatchBtn] : []),
+      el("span", { className: "muted", textContent: "or" }), typeSel, reclassBtn),
     msg,
     frame);
 

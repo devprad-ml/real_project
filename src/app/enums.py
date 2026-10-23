@@ -29,6 +29,8 @@ class JobKind(str, Enum):
     CLASSIFY = "classify"
     EMBED = "embed"
     EXTRACT = "extract"
+    ASSOCIATE = "associate"
+    ROUTE = "route"
 
 
 class JobState(str, Enum):
@@ -51,6 +53,15 @@ class AuditAction(str, Enum):
 
 
 
+
+
+class RouteQueue(str, Enum):
+    ''' Departmental work queues (BRD §6). '''
+
+    CLAIMS_OPS = "claims_ops"
+    APPEALS = "appeals"
+    UTILIZATION_MGMT = "utilization_mgmt"
+    MEMBER_SERVICES = "member_services"
 
 
 class Role(str, Enum):

@@ -6,6 +6,7 @@ from app.models.client import Client
 from app.models.job import Job
 from app.models.extracted_field import ExtractedFieldRow
 from app.models.principal import ApiKey, Principal, RoleGrant
+from app.models.member import Association, Member
 
 __all__ = ["Base", "Src", "Log", "Document", "Client", "Job", "ExtractedFieldRow",
-           "Principal", "RoleGrant", "ApiKey"]
+           "Principal", "RoleGrant", "ApiKey", "Member", "Association"]

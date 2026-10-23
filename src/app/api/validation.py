@@ -1,5 +1,5 @@
-''' The review queue: what M7's confidence gate sent to NEEDS_REVIEW, and the two ways
-a reviewer clears it. See m8.md §2. '''
+''' The review queue: what M7's confidence gate or M9's MPI match sent to NEEDS_REVIEW,
+and the two ways a reviewer clears it. See m8.md §2, m9.md §3. '''
 
 import datetime
 import uuid
@@ -47,6 +47,10 @@ class QueueItem(BaseModel):
 
 class ResolveIn(BaseModel):
     fields: dict[str, str | None] = {}
+    # The member is genuinely not in the MPI (a new enrollee not loaded yet). Skips
+    # matching, which would only send it straight back here; routing sends an
+    # unbound document to member services.
+    no_mpi_match: bool = False
 
 
 class ReclassifyIn(BaseModel):
@@ -174,16 +178,21 @@ def resolve(
         row.confidence = 1.0
         row.human_verified = True
 
-    # EXTRACTED, not an associate job: M9 scans for EXTRACTED (same reason as M7).
-    doc.status = DocumentStatus.EXTRACTED
+    detail = {"changed": changed}
+    if body.no_mpi_match:
+        doc.status, next_kind = DocumentStatus.ASSOCIATED, JobKind.ROUTE
+        detail["no_mpi_match"] = True
+    else:
+        doc.status, next_kind = DocumentStatus.EXTRACTED, JobKind.ASSOCIATE
     write_audit(
         db,
         tenant_id=doc.tenant_id,
         document_id=doc.id,
         actor=actor(principal),
         action=AuditAction.RESOLVE,
-        detail={"to": doc.status.value, "changed": changed},
+        detail={"to": doc.status.value, **detail},
     )
+    enqueue(db, tenant_id=doc.tenant_id, document_id=doc.id, kind=next_kind)
     db.commit()
 
 

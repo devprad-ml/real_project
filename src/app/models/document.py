@@ -7,7 +7,7 @@ from sqlalchemy import ForeignKey, Enum as SQLEnum
 from sqlalchemy.sql import func
 
 from app.models.base import Base
-from app.enums import DocumentStatus, DocumentType
+from app.enums import DocumentStatus, DocumentType, RouteQueue
 
 class Document(Base):
     __tablename__ = "documents"
@@ -29,4 +29,8 @@ class Document(Base):
     status: Mapped[DocumentStatus] = mapped_column(SQLEnum(DocumentStatus, native_enum=False))  # cant have default for this
     classify_confidence: Mapped[float | None] = mapped_column(nullable=True)
     summary: Mapped[str | None] = mapped_column(Text)
+    # Set by the route step. The downstream URL per queue is M10's.
+    route_queue: Mapped[RouteQueue | None] = mapped_column(
+        SQLEnum(RouteQueue, native_enum=False), nullable=True
+    )
 
