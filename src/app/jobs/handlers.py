@@ -7,8 +7,10 @@ anything. Remove the guard and a retry doubles the side effect.
 
 RECEIVED -normalize-> NORMALIZED -classify-> CLASSIFIED -embed-> EMBEDDED -extract->
 EXTRACTED (or NEEDS_REVIEW, decided by the confidence gate inside handle_extract)
+-associate-> ASSOCIATED (or NEEDS_REVIEW, no MPI match) -route-> ROUTED
 '''
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.log import write_audit
@@ -16,8 +18,9 @@ from app.enums import AuditAction, DocumentStatus, JobKind
 from app.jobs.queue import enqueue
 from app.models.document import Document
 from app.models.extracted_field import ExtractedFieldRow
+from app.models.member import Association
 from app.processing import bm25, chunk, classify, confidence, embed, extract
-from app.processing import normalize, pdftext
+from app.processing import mpi, normalize, pdftext, routing
 from app.storage import get_blob_store, get_vector_store, move_normalized
 from app.storage.blob import normalized_key
 from app.storage.vectors import Point, point_id, tenant_collection
@@ -147,10 +150,8 @@ def handle_embed(session: Session, doc: Document) -> None:
 
 def handle_extract(session: Session, doc: Document) -> None:
     ''' The confidence gate lives here, not in a separate job: no second Claude call
-    to replay separately, and no `associate` job enqueued -- M9 doesn't have a
-    handler for it yet, and an unregistered kind would fail a correctly-extracted
-    document straight to FAILED. A document that passes the gate just stays at
-    EXTRACTED; M9 will scan for that status directly. '''
+    to replay separately. A document that passes it goes on to associate; one that
+    fails waits for a reviewer, whose resolve enqueues associate instead. '''
     if doc.status != DocumentStatus.EMBEDDED:
         return
 
@@ -189,6 +190,83 @@ def handle_extract(session: Session, doc: Document) -> None:
         action=AuditAction.STATE_CHANGE,
         detail={"to": doc.status.value, "fields": len(rows), "reasons": reasons},
     )
+    if doc.status == DocumentStatus.EXTRACTED:
+        enqueue(
+            session, tenant_id=doc.tenant_id, document_id=doc.id, kind=JobKind.ASSOCIATE
+        )
+
+
+def handle_associate(session: Session, doc: Document) -> None:
+    ''' Bind the document to its member in the tenant's MPI, or send it to review.
+    Fields are trusted by now (the gate passed, or a reviewer verified them), so a
+    miss here is about the MPI, not about extraction. '''
+    if doc.status != DocumentStatus.EXTRACTED:
+        return
+
+    detail: dict = {}
+    if "member_id" in extract.FIELD_SCHEMAS.get(doc.doc_type, []):
+        fields = {
+            f.name: f
+            for f in session.scalars(
+                select(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
+            )
+        }
+        id_field, dob_field = fields.get("member_id"), fields.get("dob")
+        member_id = id_field.value if id_field else None
+        member = mpi.lookup(session, doc.tenant_id, member_id) if member_id else None
+        reasons = mpi.mismatches(member_id, dob_field and dob_field.value, member)
+        if reasons:
+            doc.status = DocumentStatus.NEEDS_REVIEW
+            detail["reasons"] = reasons
+        else:
+            # match_confidence is the id's own: the match itself is exact.
+            session.add(
+                Association(
+                    tenant_id=doc.tenant_id,
+                    document_id=doc.id,
+                    member_pk=member.id,
+                    match_confidence=id_field.confidence,
+                )
+            )
+            doc.status = DocumentStatus.ASSOCIATED
+            detail["member"] = str(member.id)
+    else:
+        # Correspondence: nothing in the schema to match on. Associated with nobody,
+        # which is the honest answer, not a failure.
+        doc.status = DocumentStatus.ASSOCIATED
+        detail["member"] = None
+
+    write_audit(
+        session,
+        tenant_id=doc.tenant_id,
+        document_id=doc.id,
+        actor="system",
+        action=AuditAction.STATE_CHANGE,
+        detail={"to": doc.status.value, **detail},
+    )
+    if doc.status == DocumentStatus.ASSOCIATED:
+        enqueue(session, tenant_id=doc.tenant_id, document_id=doc.id, kind=JobKind.ROUTE)
+
+
+def handle_route(session: Session, doc: Document) -> None:
+    ''' Pick the departmental queue. Ends the chain at ROUTED: no `push` job until
+    M10 registers a handler, or a routed document would fail to FAILED. '''
+    if doc.status != DocumentStatus.ASSOCIATED:
+        return
+
+    bound = session.scalar(
+        select(Association.id).where(Association.document_id == doc.id)
+    ) is not None
+    doc.route_queue = routing.route(doc.doc_type, bound)
+    doc.status = DocumentStatus.ROUTED
+    write_audit(
+        session,
+        tenant_id=doc.tenant_id,
+        document_id=doc.id,
+        actor="system",
+        action=AuditAction.STATE_CHANGE,
+        detail={"to": "ROUTED", "queue": doc.route_queue.value},
+    )
 
 
 HANDLERS = {
@@ -196,4 +274,6 @@ HANDLERS = {
     JobKind.CLASSIFY: handle_classify,
     JobKind.EMBED: handle_embed,
     JobKind.EXTRACT: handle_extract,
+    JobKind.ASSOCIATE: handle_associate,
+    JobKind.ROUTE: handle_route,
 }

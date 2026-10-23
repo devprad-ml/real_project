@@ -530,9 +530,8 @@ def test_the_database_refuses_a_second_row_for_the_same_field(tenant, make_doc):
             s.commit()
 
 
-def test_extract_does_not_enqueue_any_job(tenant, embedded_doc, fake_extractor):
-    """No `associate` job here -- M9 doesn't have a handler yet, and enqueuing an
-    unregistered kind would fail a correctly-extracted document to FAILED."""
+def test_extract_sends_a_document_to_review_with_no_job(embedded_doc, fake_extractor):
+    """A document in review waits for a human; resolve enqueues associate."""
     doc = embedded_doc()
 
     with SessionLocal() as s:
@@ -540,7 +539,21 @@ def test_extract_does_not_enqueue_any_job(tenant, embedded_doc, fake_extractor):
         s.commit()
 
     with SessionLocal() as s:
+        assert s.get(Document, doc.id).status == DocumentStatus.NEEDS_REVIEW
         assert _jobs(s, doc) == []
+
+
+def test_extract_enqueues_associate_when_the_gate_passes(embedded_doc, fake_extractor):
+    doc = embedded_doc(doc_type=DocumentType.CORRESPONDENCE)
+
+    with SessionLocal() as s:
+        handlers.handle_extract(s, s.get(Document, doc.id))
+        s.commit()
+
+    with SessionLocal() as s:
+        assert s.get(Document, doc.id).status == DocumentStatus.EXTRACTED
+        [job] = _jobs(s, doc)
+        assert job.kind == JobKind.ASSOCIATE
 
 
 def test_extract_is_a_noop_before_embed_ran(embedded_doc, fake_extractor):

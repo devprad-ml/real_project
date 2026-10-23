@@ -16,14 +16,18 @@ from app.models.extracted_field import ExtractedFieldRow
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%B %d, %Y")
 
 
-def _is_a_real_date(value: str) -> bool:
+def parse_date(value: str) -> datetime.date | None:
+    ''' The one date parser: the validators below and MPI matching both use it. '''
     for fmt in _DATE_FORMATS:
         try:
-            datetime.datetime.strptime(value, fmt)
-            return True
+            return datetime.datetime.strptime(value, fmt).date()
         except ValueError:
             continue
-    return False
+    return None
+
+
+def _is_a_real_date(value: str) -> bool:
+    return parse_date(value) is not None
 
 
 # A field with no entry here keeps Claude's confidence as-is -- not every field has

@@ -82,9 +82,11 @@ def _throwaway_tenant():
             "jobs",
             "audit_log",
             "extracted_fields",
+            "associations",
             "documents",
             "sources",
             "principals",
+            "members",
         ):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
