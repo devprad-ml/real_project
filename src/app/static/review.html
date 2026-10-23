@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review Queue</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#5d6670; --line:#d9dde3;
+          --accent:#2457c5; --warn:#a4460b; --ok:#1d7a3e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121417; --card:#1c1f24; --ink:#e7e9ec; --muted:#9aa3ad; --line:#30353c;
+            --accent:#7aa2ff; --warn:#f0a35e; --ok:#5fcf8a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           padding:12px 16px; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { font-size:17px; margin:0 auto 0 0; }
+  input, select, button { font:inherit; color:inherit; background:var(--bg);
+           border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.ghost { background:transparent; color:var(--accent); }
+  main { display:grid; grid-template-columns:minmax(260px, 360px) 1fr; min-height:calc(100vh - 58px); }
+  @media (max-width: 800px) { main { grid-template-columns:1fr; } }
+  #list { border-right:1px solid var(--line); overflow:auto; }
+  .item { padding:10px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .item:hover, .item.on { background:var(--card); }
+  .item small, .muted { color:var(--muted); }
+  .reason { display:inline-block; font-size:12px; color:var(--warn);
+            border:1px solid currentColor; border-radius:10px; padding:0 7px; margin:2px 4px 0 0; }
+  #detail { padding:16px; display:grid; gap:14px; align-content:start; }
+  #detail iframe { width:100%; height:60vh; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  table { border-collapse:collapse; width:100%; }
+  td { padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  td input { width:100%; }
+  .low { color:var(--warn); } .high { color:var(--ok); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #msg { min-height:1.4em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Review queue</h1>
+  <input id="key" type="password" placeholder="API key (dk_...)" size="28" autocomplete="off">
+  <button id="load">Load</button>
+</header>
+<main>
+  <section id="list"><p class="muted" style="padding:0 16px">Paste a reviewer key and load.</p></section>
+  <section id="detail"></section>
+</main>
+<script>
+const TYPES = ["claims","appeal","denial","prior_auth","correspondence","consent","medical_record"];
+const $ = (s) => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  n.append(...kids);
+  return n;
+};
+let items = [], current = null, pdfUrl = null;
+
+try { $("#key").value = sessionStorage.getItem("key") || ""; } catch {}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: {
+    Authorization: "Bearer " + $("#key").value.trim(),
+    "Content-Type": "application/json", ...(opts.headers || {}) } });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(`${r.status}: ${typeof body.detail === "string" ? body.detail : r.statusText}`);
+  }
+  return r;
+}
+
+async function load() {
+  try { sessionStorage.setItem("key", $("#key").value.trim()); } catch {}
+  const list = $("#list");
+  try {
+    items = await (await api("/validation?limit=50")).json();
+  } catch (e) { list.replaceChildren(el("p", { className: "muted", textContent: e.message, style: "padding:0 16px" })); return; }
+  if (!items.length) {
+    list.replaceChildren(el("p", { className: "muted", textContent: "Nothing to review.", style: "padding:0 16px" }));
+    $("#detail").replaceChildren();
+    return;
+  }
+  list.replaceChildren(...items.map((d) => {
+    const n = el("div", { className: "item" + (current === d.id ? " on" : "") },
+      el("div", { textContent: d.filename || d.id }),
+      el("small", { textContent: `${d.doc_type} · received ${new Date(d.received_at).toLocaleString()}` }),
+      el("div", {}, ...d.reasons.map((r) => el("span", { className: "reason", textContent: r }))));
+    n.onclick = () => show(d.id);
+    return n;
+  }));
+  show(items.some((d) => d.id === current) ? current : items[0].id);
+}
+
+async function show(id) {
+  current = id;
+  document.querySelectorAll(".item").forEach((n, i) => n.classList.toggle("on", items[i].id === id));
+  const d = items.find((x) => x.id === id);
+  const msg = el("div", { id: "msg" });
+  const frame = el("iframe", { title: "document" });
+
+  const rows = d.fields.map((f) => {
+    const input = el("input", { value: f.value ?? "", placeholder: "(not found)" });
+    input.dataset.name = f.name;
+    const conf = el("td", { className: f.confidence < 0.85 ? "low" : "high",
+                            textContent: f.confidence.toFixed(2) });
+    return el("tr", {}, el("td", { textContent: f.name }), el("td", {}, input), conf);
+  });
+
+  const resolveBtn = el("button", { textContent: "Resolve" });
+  resolveBtn.onclick = async () => {
+    const fields = {};
+    document.querySelectorAll("#detail input[data-name]").forEach((i) => {
+      fields[i.dataset.name] = i.value.trim() || null;
+    });
+    try {
+      await api(`/validation/${id}/resolve`, { method: "POST", body: JSON.stringify({ fields }) });
+      load();
+    } catch (e) { msg.textContent = e.message; }
+  };
+
+  const typeSel = el("select", {}, ...TYPES.map((t) => el("option", { value: t, textContent: t, selected: t === d.doc_type })));
+  const reclassBtn = el("button", { className: "ghost", textContent: "Reclassify" });
+  reclassBtn.onclick = async () => {
+    try {
+      await api(`/validation/${id}/reclassify`, { method: "POST", body: JSON.stringify({ doc_type: typeSel.value }) });
+      load();
+    } catch (e) { msg.textContent = e.message; }
+  };
+
+  $("#detail").replaceChildren(
+    el("div", {},
+      el("h2", { textContent: d.filename || d.id, style: "margin:0;font-size:18px" }),
+      el("div", { className: "muted", textContent:
+        `${d.doc_type} · classify confidence ${d.classify_confidence?.toFixed(2) ?? "—"}` }),
+      el("div", {}, ...d.reasons.map((r) => el("span", { className: "reason", textContent: r })))),
+    el("p", { textContent: d.summary || "No summary.", className: d.summary ? "" : "muted", style: "margin:0" }),
+    d.fields.length ? el("table", {}, ...rows) : el("p", { className: "muted", textContent: "No fields for this type." }),
+    el("div", { className: "row" }, resolveBtn, el("span", { className: "muted", textContent: "or" }), typeSel, reclassBtn),
+    msg,
+    frame);
+
+  try {
+    const blob = await (await api(`/documents/${id}/file`)).blob();
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    pdfUrl = URL.createObjectURL(blob);
+    if (current === id) frame.src = pdfUrl;
+  } catch (e) { msg.textContent = "PDF: " + e.message; }
+}
+
+$("#load").onclick = load;
+$("#key").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+</script>
+</body>
+</html>

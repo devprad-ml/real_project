@@ -20,7 +20,9 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 # import app factory
 from app.db import SessionLocal  # noqa: E402
-from app.enums import DocumentStatus, DocumentType  # noqa: E402
+from app import keys, storage  # noqa: E402
+from app.api import documents, validation  # noqa: E402
+from app.enums import DocumentStatus, DocumentType, Role  # noqa: E402
 from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
 from app.main import create_app  # noqa: E402
@@ -49,9 +51,8 @@ def intake_address(tenant_id) -> str:
     return f"intake+{tenant_id.hex}@example.com"
 
 
-@pytest.fixture
-def tenant():
-    """A throwaway client row, plus teardown of everything hung off it.
+def _throwaway_tenant():
+    """A client row, plus teardown of everything hung off it.
 
     Order matters: children before the parent, or the FKs refuse.
     """
@@ -69,13 +70,51 @@ def tenant():
     yield tenant_id
 
     with SessionLocal() as session:
-        for table in ("jobs", "audit_log", "extracted_fields", "documents", "sources"):
+        for table in ("api_keys", "role_grants"):
+            session.execute(
+                text(  # noqa: S608
+                    f"DELETE FROM {table} WHERE principal_id IN "
+                    "(SELECT id FROM principals WHERE tenant_id = :t)"
+                ),
+                {"t": tenant_id},
+            )
+        for table in (
+            "jobs",
+            "audit_log",
+            "extracted_fields",
+            "documents",
+            "sources",
+            "principals",
+        ):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
                 {"t": tenant_id},
             )
         session.execute(text("DELETE FROM clients WHERE id = :t"), {"t": tenant_id})
         session.commit()
+
+
+@pytest.fixture
+def tenant():
+    yield from _throwaway_tenant()
+
+
+@pytest.fixture
+def other_tenant():
+    """A second client, for tests that one tenant cannot reach another's data."""
+    yield from _throwaway_tenant()
+
+
+@pytest.fixture
+def staff(tenant):
+    """Factory: a staff member of `tenant` with these roles. Returns the request
+    headers carrying their new API key. Teardown is the tenant fixture's."""
+
+    def _make(*roles: Role, tenant_id=None):
+        _, key = keys.create(tenant_id or tenant, "test staff", list(roles))
+        return {"Authorization": f"Bearer {key}"}
+
+    return _make
 
 
 @pytest.fixture
@@ -130,6 +169,9 @@ def blob(monkeypatch):
     store = FakeBlobStore({"raw/test/file.pdf": b"original record bytes"})
     monkeypatch.setattr(handlers, "get_blob_store", lambda: store)
     monkeypatch.setattr(intake, "get_blob_store", lambda: store)
+    monkeypatch.setattr(storage, "get_blob_store", lambda: store)
+    monkeypatch.setattr(documents, "get_blob_store", lambda: store)
+    monkeypatch.setattr(validation, "get_blob_store", lambda: store)
     return store
 
 

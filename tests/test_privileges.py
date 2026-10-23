@@ -7,17 +7,19 @@ and raise InsufficientPrivilege in the worker.
 
 These tests connect as `app_user` -- the role the API and worker actually run as --
 and assert the controls still exist. They are the only coverage the grant migrations
-(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903) have.
+(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2) have.
 """
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import ProgrammingError
 
+from app import keys
 from app.db import SessionLocal
-from app.enums import AuditAction, JobKind, JobState
+from app.deps import hash_key
+from app.enums import AuditAction, JobKind, JobState, Role
 from app.jobs.queue import enqueue
-from app.models import Document, Job, Log
+from app.models import ApiKey, Document, ExtractedFieldRow, Job, Log, Principal, RoleGrant
 
 
 def test_connected_as_the_application_role(app_user_session):
@@ -120,3 +122,38 @@ def test_app_user_cannot_create_tables(app_user_session):
     separate credential rather than a convenience."""
     with pytest.raises(ProgrammingError, match="permission denied"):
         app_user_session.execute(text("CREATE TABLE public.sneaky (id uuid)"))
+
+
+def test_app_user_can_authenticate_and_revoke(app_user_session, tenant):
+    """The API runs as app_user: the auth lookup reads all three tables, and
+    `app.keys revoke` writes revoked_at."""
+    key_id, key = keys.create(tenant, "someone", [Role.REVIEWER])
+
+    row = app_user_session.scalar(select(ApiKey).where(ApiKey.hash == hash_key(key)))
+    assert app_user_session.get(Principal, row.principal_id).tenant_id == tenant
+    assert app_user_session.scalars(select(RoleGrant.role)).first() is not None
+    row.revoked_at = func.now()
+    app_user_session.commit()
+
+
+def test_api_keys_reject_deletes(app_user_session, tenant):
+    """A revoked key stays as the record of who held access, and when."""
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        app_user_session.execute(text("DELETE FROM api_keys"))
+
+
+def test_app_user_can_delete_extracted_fields(app_user_session, tenant, make_doc):
+    """Reclassify drops the old type's fields (their values go to the audit row)."""
+    doc = make_doc()
+    with SessionLocal() as s:
+        s.add(
+            ExtractedFieldRow(
+                tenant_id=tenant, document_id=doc.id, name="member_id", confidence=0.5
+            )
+        )
+        s.commit()
+
+    app_user_session.execute(
+        delete(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
+    )
+    app_user_session.commit()
