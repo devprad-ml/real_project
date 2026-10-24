@@ -9,42 +9,7 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.enums import AuditAction, DocumentStatus, DocumentType
 from app.models.audit_log import Log
-from app.processing import bm25, embed
 from app.search.retrieve import search
-from app.storage.vectors import Point, point_id, tenant_collection
-
-QUERY_VECTOR = [1.0, 0.0, 0.0]
-
-
-@pytest.fixture
-def query_encoder(monkeypatch):
-    monkeypatch.setattr(embed, "encode", lambda texts: [QUERY_VECTOR for _ in texts])
-
-
-@pytest.fixture
-def plant(vectors, tenant):
-    ''' Put a chunk straight into the tenant's collection, as handle_embed would. '''
-
-    def _plant(document_id, vector, *, page_no=1, idx=0, text="chunk"):
-        vectors.upsert(
-            tenant_collection(tenant),
-            [
-                Point(
-                    id=point_id(document_id, page_no, idx),
-                    vector=vector,
-                    sparse=bm25.encode_doc(text),
-                    payload={
-                        "tenant_id": str(tenant),
-                        "document_id": str(document_id),
-                        "page_no": page_no,
-                        "text": text,
-                    },
-                )
-            ],
-        )
-
-    return _plant
-
 
 def views(tenant):
     with SessionLocal() as s:

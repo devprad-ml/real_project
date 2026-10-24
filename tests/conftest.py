@@ -29,7 +29,8 @@ from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
 from app.processing import classify, embed, extract, llm, normalize, pdftext  # noqa: E402
 from app.search import retrieve  # noqa: E402
-from app.storage.vectors import Hit  # noqa: E402
+from app.processing import bm25  # noqa: E402
+from app.storage.vectors import Hit, Point, point_id, tenant_collection  # noqa: E402
 
 
 @pytest.fixture
@@ -239,6 +240,41 @@ def vectors(monkeypatch):
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
     return store
+
+
+# --- read path: chunks planted straight into a tenant's collection -------------
+
+QUERY_VECTOR = [1.0, 0.0, 0.0]
+
+
+@pytest.fixture
+def query_encoder(monkeypatch):
+    monkeypatch.setattr(embed, "encode", lambda texts: [QUERY_VECTOR for _ in texts])
+
+
+@pytest.fixture
+def plant(vectors, tenant):
+    """Put a chunk straight into the tenant's collection, as handle_embed would."""
+
+    def _plant(document_id, vector, *, page_no=1, idx=0, text="chunk"):
+        vectors.upsert(
+            tenant_collection(tenant),
+            [
+                Point(
+                    id=point_id(document_id, page_no, idx),
+                    vector=vector,
+                    sparse=bm25.encode_doc(text),
+                    payload={
+                        "tenant_id": str(tenant),
+                        "document_id": str(document_id),
+                        "page_no": page_no,
+                        "text": text,
+                    },
+                )
+            ],
+        )
+
+    return _plant
 
 
 class FakeMessages:
