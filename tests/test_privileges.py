@@ -7,7 +7,8 @@ and raise InsufficientPrivilege in the worker.
 
 These tests connect as `app_user` -- the role the API and worker actually run as --
 and assert the controls still exist. They are the only coverage the grant migrations
-(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2, d8a4f2c6e913) have.
+(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2, d8a4f2c6e913,
+e1b7c3d9a524) have.
 """
 
 import pytest
@@ -177,8 +178,15 @@ def test_app_user_can_load_members_and_bind_documents(app_user_session, tenant, 
     app_user_session.commit()
 
 
-@pytest.mark.parametrize("table", ["members", "associations"])
-def test_members_and_associations_reject_deletes(app_user_session, tenant, table):
+def test_members_reject_deletes(app_user_session, tenant):
     """A member a document was bound to must outlive the export that drops them."""
     with pytest.raises(ProgrammingError, match="permission denied"):
-        app_user_session.execute(text(f"DELETE FROM {table}"))  # noqa: S608
+        app_user_session.execute(text("DELETE FROM members"))
+
+
+def test_app_user_can_replace_an_association(app_user_session, tenant, make_doc):
+    """M10: a re-match after review deletes the old binding (e1b7c3d9a524)."""
+    app_user_session.execute(
+        delete(Association).where(Association.document_id == make_doc().id)
+    )
+    app_user_session.commit()

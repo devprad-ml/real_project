@@ -41,6 +41,7 @@ jobs:
                 DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/app_db
                 ANTHROPIC_API_KEY: some_anthropic_key
                 DOWNSTREAM_BASE_URL: http://downstream.valid
+                DOWNSTREAM_WEBHOOK_SECRET: ci-webhook-secret
               run: uv run alembic upgrade head
 
             - name: Run test suite
@@ -52,6 +53,7 @@ jobs:
                 APP_USER_DATABASE_URL: postgresql+psycopg2://app_user:password2@localhost:5432/app_db
                 ANTHROPIC_API_KEY: some_anthropic_key
                 DOWNSTREAM_BASE_URL: http://downstream.valid
+                DOWNSTREAM_WEBHOOK_SECRET: ci-webhook-secret
               run: uv run pytest
 
 

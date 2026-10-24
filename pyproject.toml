@@ -25,6 +25,7 @@ dependencies = [
     "qdrant-client>=1.19.1",
     "imap-tools>=1.15.0",
     "anthropic>=1.15.0",
+    "httpx>=0.28.1",
 ]
 
 

@@ -31,6 +31,7 @@ class JobKind(str, Enum):
     EXTRACT = "extract"
     ASSOCIATE = "associate"
     ROUTE = "route"
+    PUSH = "push"
 
 
 class JobState(str, Enum):
@@ -47,6 +48,8 @@ class AuditAction(str, Enum):
     RECLASSIFY = "reclassify"
     RESOLVE = "resolve"
     DELETE = "delete"
+    REQUEUE = "requeue"
+    VERDICT = "verdict"  # the downstream's answer, when it changes no status
     
     
 

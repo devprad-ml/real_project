@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     extract_max_chars: int = Field(20000, ge=1)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
     max_attempts: int = Field(5, ge=1)
+    # Push waits out downstream outages: with the 15-min backoff cap and jitter, 30
+    # attempts is 2.6-5.3 h of retrying before FAILED (m10.md §3).
+    push_max_attempts: int = Field(30, ge=1)
     qdrant_url: str = "http://localhost:6333"
     # embed_dim must match embed_model's output width -- a collection is created with
     # a fixed vector size, so swapping the model means a new collection, not a reuse.
@@ -43,6 +46,8 @@ class Settings(BaseSettings):
     # Cap at intake: the blob is never written, so an oversized attachment costs nothing.
     max_attachment_bytes: int = Field(25 * 1024 * 1024, ge=1)
     downstream_base_url: str  # str for now, change to HttpUrl later
+    # Required: a missing secret must stop startup, never mean "accept unsigned".
+    downstream_webhook_secret: SecretStr
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 @lru_cache

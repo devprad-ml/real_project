@@ -8,11 +8,13 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 # then first party(local files)
+from app.api.admin import router as admin_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.review import router as review_router
 from app.api.search import router as search_router
 from app.api.validation import router as validation_router
+from app.api.webhooks import router as webhooks_router
 from app.db import engine
 
 # check version match else revert to default
@@ -48,6 +50,8 @@ def create_app() -> FastAPI:
     app.include_router(documents_router)
     app.include_router(validation_router)
     app.include_router(review_router)
+    app.include_router(webhooks_router)
+    app.include_router(admin_router)
     return app
 
 # ASGI entrypoint for uvicorn
