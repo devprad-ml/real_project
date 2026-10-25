@@ -18,6 +18,7 @@ from app.jobs.queue import enqueue
 from app.models.audit_log import Log
 from app.models.document import Document
 from app.models.extracted_field import ExtractedFieldRow
+from app.models.member import Association
 from app.models.principal import Principal
 from app.processing.confidence import VALIDATORS
 from app.processing.extract import FIELD_SCHEMAS
@@ -180,6 +181,9 @@ def resolve(
 
     detail = {"changed": changed}
     if body.no_mpi_match:
+        # A binding from an earlier pass (before a downstream rejection) would make
+        # route treat the document as bound.
+        db.execute(delete(Association).where(Association.document_id == doc.id))
         doc.status, next_kind = DocumentStatus.ASSOCIATED, JobKind.ROUTE
         detail["no_mpi_match"] = True
     else:

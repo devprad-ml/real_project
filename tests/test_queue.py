@@ -7,7 +7,13 @@ import pytest
 from app.config import get_settings
 from app.db import SessionLocal
 from app.enums import DocumentStatus, JobKind, JobState
-from app.jobs.queue import claim_one, enqueue, fail_with_backoff, sweep_stale
+from app.jobs.queue import (
+    BACKOFF_CAP_SECONDS,
+    claim_one,
+    enqueue,
+    fail_with_backoff,
+    sweep_stale,
+)
 from app.models import Document, Job
 
 
@@ -165,4 +171,37 @@ def test_backoff_is_exponential(db, tenant, make_doc, attempts, expected):
         delay = (job.run_after - before).total_seconds()
         s.commit()
 
-    assert expected - 1 <= delay <= expected + 1
+    # jittered down to half, never up
+    assert expected / 2 - 1 <= delay <= expected + 1
+
+
+def test_backoff_is_capped(db, tenant, make_doc):
+    doc = make_doc()
+    with SessionLocal() as s:
+        job = enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.PUSH)
+        job.attempts = 20  # 2**21 s uncapped: 24 days
+        s.commit()
+        before = _utcnow()
+        fail_with_backoff(s, job, "boom")
+        delay = (job.run_after - before).total_seconds()
+        s.commit()
+
+    assert delay <= BACKOFF_CAP_SECONDS + 1
+
+
+def test_push_outlasts_the_default_attempt_limit(db, tenant, make_doc):
+    """A downstream outage must not FAIL pushes after the 5 attempts that suit a
+    Claude blip."""
+    settings = get_settings()
+    doc = make_doc()
+    with SessionLocal() as s:
+        job = enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.PUSH)
+        job.attempts = settings.max_attempts
+        s.commit()
+        fail_with_backoff(s, job, "boom")
+        s.commit()
+        assert job.state == JobState.PENDING
+        job.attempts = settings.push_max_attempts - 1
+        fail_with_backoff(s, job, "boom")
+        s.commit()
+        assert job.state == JobState.ERROR

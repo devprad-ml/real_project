@@ -25,8 +25,32 @@ class Settings(BaseSettings):
     # A field can be on any page, so extraction needs more of the document than
     # classify did.
     extract_max_chars: int = Field(20000, ge=1)
+    # Haiku 5.5 at effort medium (answer.py), chosen on cost over Sonnet 5.5 (~12x)
+    # after a live comparison (m12.md §8). Low effort left facts uncited.
+    ask_model: str = "claude-haiku-5-5"
+    # Chunks retrieved per question: ~a few thousand input tokens.
+    ask_top_k: int = Field(8, ge=1, le=20)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
     max_attempts: int = Field(5, ge=1)
+    # Push waits out downstream outages: with the 15-min backoff cap and jitter, 30
+    # attempts is 2.6-5.3 h of retrying before FAILED (m10.md §3).
+    push_max_attempts: int = Field(30, ge=1)
+    # A running job refreshes its lock every heartbeat, so a lock this stale means its
+    # worker died. Kill-to-reclaim is at most lease + sweep = 45 s (m13.md §2.1).
+    job_lease_seconds: int = Field(30, ge=1)
+    job_heartbeat_seconds: int = Field(10, ge=1)
+    sweep_seconds: int = Field(15, ge=1)
+    # Load the embedder at API startup instead of on the first /ask (19 s, m12.md §7).
+    warm_embedder: bool = True
+    log_level: str = "INFO"
+    # Threads that run sync routes (anyio's default is also 40). The DB pool is sized
+    # from it in db.py: a request holds its connection while it waits for a thread, so
+    # fewer connections than threads deadlocks under load (m13.md §8).
+    threadpool_size: int = Field(40, ge=1)
+    db_pool_size: int = Field(10, ge=1)
+    # Requests over threadpool_size wait here, holding no thread and no connection; past
+    # this they get a 503 instead of an unbounded queue.
+    queue_timeout_seconds: float = Field(10, gt=0)
     qdrant_url: str = "http://localhost:6333"
     # embed_dim must match embed_model's output width -- a collection is created with
     # a fixed vector size, so swapping the model means a new collection, not a reuse.
@@ -43,6 +67,8 @@ class Settings(BaseSettings):
     # Cap at intake: the blob is never written, so an oversized attachment costs nothing.
     max_attachment_bytes: int = Field(25 * 1024 * 1024, ge=1)
     downstream_base_url: str  # str for now, change to HttpUrl later
+    # Required: a missing secret must stop startup, never mean "accept unsigned".
+    downstream_webhook_secret: SecretStr
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 @lru_cache

@@ -7,7 +7,8 @@ and raise InsufficientPrivilege in the worker.
 
 These tests connect as `app_user` -- the role the API and worker actually run as --
 and assert the controls still exist. They are the only coverage the grant migrations
-(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2, d8a4f2c6e913) have.
+(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2, d8a4f2c6e913,
+e1b7c3d9a524, a2c8e5d1b937) have.
 """
 
 import pytest
@@ -177,8 +178,43 @@ def test_app_user_can_load_members_and_bind_documents(app_user_session, tenant, 
     app_user_session.commit()
 
 
-@pytest.mark.parametrize("table", ["members", "associations"])
-def test_members_and_associations_reject_deletes(app_user_session, tenant, table):
+def test_members_reject_deletes(app_user_session, tenant):
     """A member a document was bound to must outlive the export that drops them."""
     with pytest.raises(ProgrammingError, match="permission denied"):
-        app_user_session.execute(text(f"DELETE FROM {table}"))  # noqa: S608
+        app_user_session.execute(text("DELETE FROM members"))
+
+
+def test_app_user_can_replace_an_association(app_user_session, tenant, make_doc):
+    """M10: a re-match after review deletes the old binding (e1b7c3d9a524)."""
+    app_user_session.execute(
+        delete(Association).where(Association.document_id == make_doc().id)
+    )
+    app_user_session.commit()
+
+
+def test_llm_usage_rejects_updates(app_user_session, tenant):
+    """The spend record is append-only, like audit_log (migration a2c8e5d1b937)."""
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        app_user_session.execute(
+            text("UPDATE llm_usage SET input_tokens = 0 WHERE tenant_id = :t"),
+            {"t": tenant},
+        )
+
+
+def test_llm_usage_rejects_deletes(app_user_session, tenant):
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        app_user_session.execute(
+            text("DELETE FROM llm_usage WHERE tenant_id = :t"), {"t": tenant}
+        )
+
+
+def test_llm_usage_accepts_inserts(app_user_session, tenant):
+    app_user_session.execute(
+        text(
+            "INSERT INTO llm_usage (id, tenant_id, purpose, model, input_tokens, "
+            "output_tokens, latency_ms) "
+            "VALUES (gen_random_uuid(), :t, 'ask', 'm', 1, 1, 1)"
+        ),
+        {"t": tenant},
+    )
+    app_user_session.rollback()  # not left behind for the tenant teardown to trip on

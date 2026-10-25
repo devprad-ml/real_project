@@ -174,6 +174,41 @@ def test_correspondence_associates_with_nobody(extracted_doc):
     assert log.detail == {"to": "ASSOCIATED", "member": None}
 
 
+def test_a_second_pass_replaces_the_old_binding(extracted_doc, member, tenant):
+    """Back from review (a downstream rejection) with a corrected member_id."""
+    doc = extracted_doc(member_id="ABC123")
+    run(handlers.handle_associate, doc)
+    with SessionLocal() as s:
+        other = Member(tenant_id=tenant, member_id="NEW1")
+        s.add(other)
+        s.get(Document, doc.id).status = DocumentStatus.EXTRACTED
+        s.scalar(
+            select(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
+        ).value = "NEW1"
+        s.commit()
+        other_id = other.id
+
+    run(handlers.handle_associate, doc)
+
+    assert state(doc)[1].member_pk == other_id
+
+
+def test_a_failed_rematch_drops_the_old_binding(extracted_doc, member):
+    doc = extracted_doc(member_id="ABC123")
+    run(handlers.handle_associate, doc)
+    with SessionLocal() as s:
+        s.get(Document, doc.id).status = DocumentStatus.EXTRACTED
+        s.scalar(
+            select(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
+        ).value = "GONE"
+        s.commit()
+
+    run(handlers.handle_associate, doc)
+
+    d, assoc, _, _ = state(doc)
+    assert (d.status, assoc) == (DocumentStatus.NEEDS_REVIEW, None)
+
+
 def test_associate_is_a_noop_unless_extracted(extracted_doc, member):
     doc = extracted_doc(status=DocumentStatus.ASSOCIATED, member_id="ABC123")
 
@@ -183,7 +218,7 @@ def test_associate_is_a_noop_unless_extracted(extracted_doc, member):
     assert (assoc, jobs, log) == (None, [], None)
 
 
-def test_route_sets_the_queue_and_ends_the_chain(extracted_doc, member):
+def test_route_sets_the_queue_and_enqueues_push(extracted_doc, member):
     doc = extracted_doc(DocumentType.APPEAL, member_id="ABC123")
     run(handlers.handle_associate, doc)
 
@@ -192,7 +227,7 @@ def test_route_sets_the_queue_and_ends_the_chain(extracted_doc, member):
     d, _, jobs, log = state(doc)
     assert d.status == DocumentStatus.ROUTED
     assert d.route_queue == RouteQueue.APPEALS
-    assert jobs == [JobKind.ROUTE]  # the one associate enqueued; route adds none
+    assert sorted(jobs) == sorted([JobKind.ROUTE, JobKind.PUSH])
     assert log.detail == {"to": "ROUTED", "queue": "appeals"}
 
 

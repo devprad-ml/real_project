@@ -13,6 +13,9 @@ wheels/
 .env.test
 .env
 _blobs/
+# LocalBlobStore keys when BLOB_LOCAL_ROOT is empty (repo root): documents, never commit
+/raw/
+/derived/
 
 # database files
 *.sqlite3

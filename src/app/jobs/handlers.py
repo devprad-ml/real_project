@@ -7,18 +7,20 @@ anything. Remove the guard and a retry doubles the side effect.
 
 RECEIVED -normalize-> NORMALIZED -classify-> CLASSIFIED -embed-> EMBEDDED -extract->
 EXTRACTED (or NEEDS_REVIEW, decided by the confidence gate inside handle_extract)
--associate-> ASSOCIATED (or NEEDS_REVIEW, no MPI match) -route-> ROUTED
+-associate-> ASSOCIATED (or NEEDS_REVIEW, no MPI match) -route-> ROUTED -push-> PUSHED
 '''
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.audit.log import write_audit
 from app.enums import AuditAction, DocumentStatus, JobKind
+from app.integrations import downstream
 from app.jobs.queue import enqueue
+from app.models.audit_log import Log
 from app.models.document import Document
 from app.models.extracted_field import ExtractedFieldRow
-from app.models.member import Association
+from app.models.member import Association, Member
 from app.processing import bm25, chunk, classify, confidence, embed, extract
 from app.processing import mpi, normalize, pdftext, routing
 from app.storage import get_blob_store, get_vector_store, move_normalized
@@ -203,6 +205,9 @@ def handle_associate(session: Session, doc: Document) -> None:
     if doc.status != DocumentStatus.EXTRACTED:
         return
 
+    # A document back from review (or a downstream rejection) may carry a binding
+    # from its last pass. It must not survive a re-match; the audit rows keep it.
+    session.execute(delete(Association).where(Association.document_id == doc.id))
     detail: dict = {}
     if "member_id" in extract.FIELD_SCHEMAS.get(doc.doc_type, []):
         fields = {
@@ -249,8 +254,7 @@ def handle_associate(session: Session, doc: Document) -> None:
 
 
 def handle_route(session: Session, doc: Document) -> None:
-    ''' Pick the departmental queue. Ends the chain at ROUTED: no `push` job until
-    M10 registers a handler, or a routed document would fail to FAILED. '''
+    ''' Pick the departmental queue. '''
     if doc.status != DocumentStatus.ASSOCIATED:
         return
 
@@ -267,6 +271,67 @@ def handle_route(session: Session, doc: Document) -> None:
         action=AuditAction.STATE_CHANGE,
         detail={"to": "ROUTED", "queue": doc.route_queue.value},
     )
+    enqueue(session, tenant_id=doc.tenant_id, document_id=doc.id, kind=JobKind.PUSH)
+
+
+def handle_push(session: Session, doc: Document) -> None:
+    ''' Hand the document to the downstream system. The one handler whose side effect
+    lives in someone else's system, so it is the idempotency key, not the status
+    guard, that stops a replay from submitting twice.
+
+    The key counts this document's earlier successful pushes. A retry of this push
+    (crash after the downstream accepted, before our commit) computes the same key
+    and is deduped there; a re-push after a rejection and review gets the next one,
+    so the downstream treats the corrected document as new. '''
+    if doc.status != DocumentStatus.ROUTED:
+        return
+
+    pushes = session.scalar(
+        select(func.count()).where(
+            Log.document_id == doc.id,
+            Log.action == AuditAction.STATE_CHANGE,
+            Log.detail["to"].astext == DocumentStatus.PUSHED.value,
+        )
+    )
+    key = f"{doc.id}:{pushes}"
+    fields = dict(
+        session.execute(
+            select(ExtractedFieldRow.name, ExtractedFieldRow.value).where(
+                ExtractedFieldRow.document_id == doc.id
+            )
+        ).all()
+    )
+    member_id = session.scalar(
+        select(Member.member_id)
+        .join(Association, Association.member_pk == Member.id)
+        .where(Association.document_id == doc.id)
+    )
+    metadata = {
+        "external_id": str(doc.id),
+        "tenant_id": str(doc.tenant_id),
+        "doc_type": doc.doc_type.value,
+        "queue": doc.route_queue.value,
+        "member_id": member_id,
+        "summary": doc.summary,
+        # Every field passed the gate or was verified by a human to get here.
+        "fields": fields,
+    }
+    pdf = get_blob_store().get(doc.normalized_blob_key)
+
+    # The call before the status flip, as with every other side effect: a raise
+    # leaves the document ROUTED for the retry.
+    status_code = downstream.push(
+        metadata, pdf, f"{doc.doc_type.value}.pdf", idempotency_key=key
+    )
+    doc.status = DocumentStatus.PUSHED
+    write_audit(
+        session,
+        tenant_id=doc.tenant_id,
+        document_id=doc.id,
+        actor="system",
+        action=AuditAction.STATE_CHANGE,
+        detail={"to": "PUSHED", "idempotency_key": key, "status_code": status_code},
+    )
 
 
 HANDLERS = {
@@ -276,4 +341,18 @@ HANDLERS = {
     JobKind.EXTRACT: handle_extract,
     JobKind.ASSOCIATE: handle_associate,
     JobKind.ROUTE: handle_route,
+    JobKind.PUSH: handle_push,
+}
+
+# The status each handler's guard requires. Requeue puts a FAILED document back here
+# and re-enqueues the kind that failed. Kept beside HANDLERS so a new handler and its
+# precondition are written together.
+REQUIRES = {
+    JobKind.NORMALIZE: DocumentStatus.RECEIVED,
+    JobKind.CLASSIFY: DocumentStatus.NORMALIZED,
+    JobKind.EMBED: DocumentStatus.CLASSIFIED,
+    JobKind.EXTRACT: DocumentStatus.EMBEDDED,
+    JobKind.ASSOCIATE: DocumentStatus.EXTRACTED,
+    JobKind.ROUTE: DocumentStatus.ASSOCIATED,
+    JobKind.PUSH: DocumentStatus.ROUTED,
 }

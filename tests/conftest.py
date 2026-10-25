@@ -1,5 +1,6 @@
 """ testing code"""
 
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -7,9 +8,11 @@ from dotenv import load_dotenv
 env = Path(__file__).resolve().parent.parent / ".env.test"
 load_dotenv(dotenv_path=env, override=True)
 
+# The API lifespan would load the 90 MB embedder for every `client` fixture.
+os.environ.setdefault("WARM_EMBEDDER", "false")
+
 # import pytest now
 import math  # noqa: E402
-import os  # noqa: E402
 import types  # noqa: E402
 import uuid  # noqa: E402
 
@@ -21,7 +24,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 # import app factory
 from app.db import SessionLocal  # noqa: E402
 from app import keys, storage  # noqa: E402
-from app.api import documents, validation  # noqa: E402
+from app.api import documents, health, validation  # noqa: E402
 from app.enums import DocumentStatus, DocumentType, Role  # noqa: E402
 from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
@@ -29,7 +32,8 @@ from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
 from app.processing import classify, embed, extract, llm, normalize, pdftext  # noqa: E402
 from app.search import retrieve  # noqa: E402
-from app.storage.vectors import Hit  # noqa: E402
+from app.processing import bm25  # noqa: E402
+from app.storage.vectors import Hit, Point, point_id, tenant_collection  # noqa: E402
 
 
 @pytest.fixture
@@ -80,6 +84,7 @@ def _throwaway_tenant():
             )
         for table in (
             "jobs",
+            "llm_usage",
             "audit_log",
             "extracted_fields",
             "associations",
@@ -193,6 +198,11 @@ class FakeVectorStore:
     def __init__(self):
         self.collections: dict[str, dict[str, object]] = {}
         self.upserts = 0  # a replay that writes nothing still must not call upsert
+        self.down = False  # ping() raises, as an unreachable qdrant would
+
+    def ping(self):
+        if self.down:
+            raise ConnectionError("vector store down")
 
     def upsert(self, collection, points):
         self.upserts += 1
@@ -238,7 +248,43 @@ def vectors(monkeypatch):
     store = FakeVectorStore()
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
+    monkeypatch.setattr(health, "get_vector_store", lambda: store)
     return store
+
+
+# --- read path: chunks planted straight into a tenant's collection -------------
+
+QUERY_VECTOR = [1.0, 0.0, 0.0]
+
+
+@pytest.fixture
+def query_encoder(monkeypatch):
+    monkeypatch.setattr(embed, "encode", lambda texts: [QUERY_VECTOR for _ in texts])
+
+
+@pytest.fixture
+def plant(vectors, tenant):
+    """Put a chunk straight into the tenant's collection, as handle_embed would."""
+
+    def _plant(document_id, vector, *, page_no=1, idx=0, text="chunk"):
+        vectors.upsert(
+            tenant_collection(tenant),
+            [
+                Point(
+                    id=point_id(document_id, page_no, idx),
+                    vector=vector,
+                    sparse=bm25.encode_doc(text),
+                    payload={
+                        "tenant_id": str(tenant),
+                        "document_id": str(document_id),
+                        "page_no": page_no,
+                        "text": text,
+                    },
+                )
+            ],
+        )
+
+    return _plant
 
 
 class FakeMessages:

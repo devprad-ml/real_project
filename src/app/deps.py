@@ -7,7 +7,7 @@ API keys only: `Authorization: Bearer dk_...`. JWT is deliberately absent -- see
 import hashlib
 import secrets
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,9 @@ def hash_key(key: str) -> str:
 
 
 def current_principal(
-    authorization: str = Header(""), db: Session = Depends(get_session)
+    request: Request,
+    authorization: str = Header(""),
+    db: Session = Depends(get_session),
 ) -> Principal:
     scheme, _, key = authorization.partition(" ")
     principal = None
@@ -45,6 +47,9 @@ def current_principal(
             detail="invalid or missing API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # For the access log (main.py), which cannot see the dependency's result.
+    request.state.tenant_id = principal.tenant_id
+    request.state.principal_id = principal.id
     return principal
 
 

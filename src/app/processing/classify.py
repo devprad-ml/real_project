@@ -7,6 +7,7 @@ output schema is the `DocumentType` enum, and the model cannot invent a type.
 PHI leaves the boundary on every call. Production needs a BAA with Anthropic.
 '''
 
+import time
 from typing import Iterable
 
 import anthropic
@@ -41,6 +42,7 @@ def run(pages: Iterable[str]) -> ClassifyResult:
     if not text:
         return UNCLASSIFIED  # blank fax: nothing to send, and nothing to pay for
 
+    started = time.perf_counter()
     try:
         response = llm.client().messages.parse(
             model=s.classify_model,
@@ -56,6 +58,8 @@ def run(pages: Iterable[str]) -> ClassifyResult:
     except anthropic.BadRequestError as exc:
         # A 400 fails the same way on every retry.
         raise PermanentError(f"classify request rejected: {exc.message}") from exc
+
+    llm.record("classify", s.classify_model, response, started)
 
     # A refusal, or no parsable output, is a document a human should look at -- not
     # a job failure. UNKNOWN with confidence 0 is what the M7 review gate catches.

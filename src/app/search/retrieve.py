@@ -32,16 +32,11 @@ class SearchHit(BaseModel):
     text: str
 
 
-def search(
-    session: Session,
-    *,
-    tenant_id: uuid.UUID,
-    query: str,
-    limit: int = 10,
-    actor: str = "api",
+def retrieve(
+    session: Session, *, tenant_id: uuid.UUID, query: str, limit: int = 10
 ) -> list[SearchHit]:
-    ''' Does not commit: the caller owns the transaction, and the audit rows staged
-    here must commit with it. Results without their audit rows must never happen. '''
+    ''' Ranked hits, nothing audited. Every caller must audit what it discloses:
+    `search` below for /search, `api.ask` for /ask. '''
     # The same encode handle_embed uses: vectors from two different models are not
     # comparable, so there is exactly one place a vector can come from.
     vector = embed.encode([query])[0]
@@ -62,7 +57,7 @@ def search(
         )
     }
 
-    results = [
+    return [
         SearchHit(
             document_id=doc.id,
             filename=doc.source_filename,
@@ -77,8 +72,17 @@ def search(
         if (doc := docs.get(uuid.UUID(h.payload["document_id"]))) is not None
     ]
 
-    # A search returns chart text, which is a disclosure. One row per document, in
-    # rank order: "which documents did they see" is the question an auditor asks.
+
+def audit_views(
+    session: Session,
+    results: list[SearchHit],
+    *,
+    tenant_id: uuid.UUID,
+    actor: str,
+    detail: dict,
+) -> None:
+    ''' One VIEW row per document, in rank order: "which documents did they see" is
+    the question an auditor asks. '''
     for document_id in dict.fromkeys(r.document_id for r in results):
         write_audit(
             session,
@@ -86,6 +90,27 @@ def search(
             document_id=document_id,
             actor=actor,
             action=AuditAction.VIEW,
-            detail={"via": "search", "query": query},
+            detail=detail,
         )
+
+
+def search(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    query: str,
+    limit: int = 10,
+    actor: str = "api",
+) -> list[SearchHit]:
+    ''' Does not commit: the caller owns the transaction, and the audit rows staged
+    here must commit with it. Results without their audit rows must never happen. '''
+    results = retrieve(session, tenant_id=tenant_id, query=query, limit=limit)
+    # A search returns chart text, which is a disclosure.
+    audit_views(
+        session,
+        results,
+        tenant_id=tenant_id,
+        actor=actor,
+        detail={"via": "search", "query": query},
+    )
     return results
