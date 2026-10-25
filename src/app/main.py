@@ -10,6 +10,7 @@ from sqlalchemy import text
 # then first party(local files)
 from app.api.admin import router as admin_router
 from app.api.ask import router as ask_router
+from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.review import router as review_router
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(admin_router)
     app.include_router(ask_router)
+    app.include_router(chat_router)
     return app
 
 # ASGI entrypoint for uvicorn

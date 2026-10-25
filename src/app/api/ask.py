@@ -23,6 +23,8 @@ class AskIn(BaseModel):
     # Same cap as /search's q: the embedder truncates at 256 tokens, and the
     # question lands in audit_log once per retrieved document.
     question: str = Field(min_length=1, max_length=1000)
+    # Follow-ups: the client sends its earlier turns; the server keeps nothing.
+    history: list[answer.Turn] = Field(default=[], max_length=6)
 
 
 class Source(BaseModel):
@@ -44,10 +46,17 @@ def ask(
     principal: Principal = Depends(require_role()),
     db: Session = Depends(get_session),
 ) -> AskOut:
+    # "Why?" alone retrieves nothing useful. Current question first: the embedder
+    # truncates at 256 tokens, so the old question is what gets cut.
+    # ponytail: a topic change drags the old topic into retrieval; a Haiku
+    # standalone-query rewrite if that shows up in use.
+    query = body.question
+    if body.history:
+        query += " " + body.history[-1].question
     hits = retrieve(
         db,
         tenant_id=principal.tenant_id,
-        query=body.question,
+        query=query,
         limit=get_settings().ask_top_k,
     )
     if not hits:
@@ -68,7 +77,7 @@ def ask(
     db.close()
 
     try:
-        segments = answer.run(body.question, hits)
+        segments = answer.run(body.question, hits, body.history)
     except anthropic.BadRequestError:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, detail="the model rejected the request"

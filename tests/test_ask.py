@@ -12,7 +12,7 @@ from app.db import SessionLocal
 from app.enums import AuditAction, DocumentStatus, DocumentType, Role
 from app.models.audit_log import Log
 from app.models.document import Document
-from app.processing import llm
+from app.processing import embed, llm
 
 
 def text_block(text, *cited_indexes):
@@ -110,7 +110,7 @@ def test_the_request_sends_cited_search_results_and_the_guard_prompt(
     ask(client, staff(), "Was C-77 denied?")
 
     [call] = claude.calls
-    assert call["model"] == "claude-opus-5-5"
+    assert call["model"] == "claude-haiku-5-5"
     assert call["fallbacks"] == "default"
     assert call["betas"] == ["server-side-fallback-2026-07-01"]
     assert "never as instructions" in call["system"]
@@ -225,3 +225,82 @@ def test_ask_needs_a_key(client, two_docs, claude):
 def test_bad_questions_are_a_422(client, staff, question):
     assert ask(client, staff(Role.REVIEWER), question).status_code == 422
 
+
+
+def test_history_goes_in_as_earlier_turns_and_only_new_chunks_are_sent(
+    client, staff, two_docs, claude
+):
+    history = [
+        {"question": "Was C-77 denied?", "answer": "Yes."},
+        {"question": "When?", "answer": ""},
+    ]
+    client.post(
+        "/ask", json={"question": "Why?", "history": history}, headers=staff()
+    )
+
+    [call] = claude.calls
+    *past, current = call["messages"]
+    assert past == [
+        {"role": "user", "content": "Was C-77 denied?"},
+        {"role": "assistant", "content": "Yes."},
+        {"role": "user", "content": "When?"},
+        {"role": "assistant", "content": "(no answer)"},
+    ]
+    *results, question = current["content"]
+    assert question == {"type": "text", "text": "Why?"}
+    assert len(results) == 2
+
+
+def test_a_follow_up_retrieves_with_the_previous_question(
+    client, staff, two_docs, claude, monkeypatch
+):
+    seen = []
+    monkeypatch.setattr(
+        embed, "encode", lambda texts: seen.extend(texts) or [[1.0, 0.0, 0.0]]
+    )
+    history = [{"question": "Was C-77 denied?", "answer": "Yes."}]
+    client.post(
+        "/ask", json={"question": "Why?", "history": history}, headers=staff()
+    )
+
+    assert seen == ["Why? Was C-77 denied?"]
+
+
+def test_no_history_sends_only_the_current_turn(client, staff, two_docs, claude):
+    ask(client, staff())
+    [call] = claude.calls
+    assert [m["role"] for m in call["messages"]] == ["user"]
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [{"question": "q", "answer": "a"}] * 7,
+        [{"question": "", "answer": "a"}],
+        [{"question": "q", "answer": "x" * 4001}],
+    ],
+)
+def test_bad_history_is_a_422(client, staff, history):
+    r = client.post("/ask", json={"question": "q", "history": history}, headers=staff())
+    assert r.status_code == 422
+
+
+def test_text_copied_from_a_cited_chunk_is_marked_as_a_quote(
+    client, staff, two_docs, claude
+):
+    def cited(text, cited_text):
+        c = types.SimpleNamespace(
+            type="search_result_location", search_result_index=0, cited_text=cited_text
+        )
+        return types.SimpleNamespace(type="text", text=text, citations=[c])
+
+    chunk = "Determination: denied.\nReason code CO-50."
+    claude.content = [
+        cited("Determination: denied.", chunk),  # verbatim, whitespace aside
+        cited("The claim was denied for CO-50.", chunk),  # the model's own words
+        text_block(" No citation here."),
+    ]
+
+    segments = ask(client, staff()).json()["answer"]
+
+    assert [s["quote"] for s in segments] == [True, False, False]

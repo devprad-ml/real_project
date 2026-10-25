@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Document Assistant</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#5d6670; --line:#d9dde3;
+          --accent:#2457c5; --warn:#a4460b; --mine:#e6edfb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121417; --card:#1c1f24; --ink:#e7e9ec; --muted:#9aa3ad; --line:#30353c;
+            --accent:#7aa2ff; --warn:#f0a35e; --mine:#1f2a40; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           padding:12px 16px; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { font-size:17px; margin:0 auto 0 0; }
+  input, button { font:inherit; color:inherit; background:var(--bg);
+           border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; color:var(--accent); }
+  main { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr);
+         height:calc(100vh - 58px); }
+  @media (max-width: 800px) { main { grid-template-columns:1fr; height:auto; } }
+  #chat { display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--line); }
+  #log { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  @media (max-width: 800px) { #log { min-height:50vh; } }
+  .q, .a { max-width:85%; padding:8px 12px; border-radius:10px; white-space:pre-wrap; }
+  .q { align-self:flex-end; background:var(--mine); }
+  .a { align-self:flex-start; background:var(--card); border:1px solid var(--line); }
+  .muted { color:var(--muted); }
+  .err { color:var(--warn); }
+  .quote { font-style:italic; color:var(--muted); }
+  sup a { color:var(--accent); text-decoration:none; cursor:pointer; padding:0 1px; }
+  .sources { margin-top:6px; font-size:13px; color:var(--muted); white-space:normal; }
+  .sources a { color:var(--accent); cursor:pointer; margin-right:10px; }
+  form { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line);
+         background:var(--card); }
+  form input { flex:1; min-width:0; }
+  #viewer { display:grid; min-height:0; }
+  #viewer iframe { width:100%; height:100%; border:0; background:#fff; }
+  @media (max-width: 800px) { #viewer iframe { height:70vh; } }
+  #viewer p { padding:16px; margin:0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Document assistant</h1>
+  <input id="key" type="password" placeholder="API key (dk_...)" size="28" autocomplete="off">
+  <button id="new" class="ghost">New chat</button>
+</header>
+<main>
+  <section id="chat">
+    <div id="log"><p class="muted">Paste your API key, then ask about your documents.</p></div>
+    <form id="ask">
+      <input id="q" placeholder="Ask a question..." maxlength="1000" autocomplete="off">
+      <button id="send">Ask</button>
+    </form>
+  </section>
+  <section id="viewer"><p class="muted">Click a citation to open the page it came from.</p></section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  n.append(...kids);
+  return n;
+};
+// The transcript is PHI: memory only, never browser storage. A reload is a new chat.
+let turns = [], pdfUrl = null;
+const MAX_TURNS = 6;  // the server's history cap
+
+try { $("#key").value = sessionStorage.getItem("key") || ""; } catch {}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: {
+    Authorization: "Bearer " + $("#key").value.trim(),
+    "Content-Type": "application/json", ...(opts.headers || {}) } });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401 || r.status === 403) throw new Error("Check your API key.");
+    if (r.status === 502 || r.status === 503) throw new Error("The assistant is unavailable, try again.");
+    throw new Error(`${r.status}: ${typeof body.detail === "string" ? body.detail : r.statusText}`);
+  }
+  return r;
+}
+
+async function openPage(documentId, page) {
+  $("#viewer").replaceChildren(el("p", { className: "muted", textContent: "Opening..." }));
+  try {
+    const blob = await (await api(`/documents/${documentId}/file`)).blob();
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    pdfUrl = URL.createObjectURL(blob);
+    $("#viewer").replaceChildren(el("iframe", { title: "document", src: `${pdfUrl}#page=${page}` }));
+  } catch (e) {
+    $("#viewer").replaceChildren(el("p", { className: "err", textContent: e.message }));
+  }
+}
+
+const link = (text, documentId, page, title) => {
+  const a = el("a", { textContent: text, title, href: "#" });
+  a.onclick = (e) => { e.preventDefault(); openPage(documentId, page); };
+  return a;
+};
+
+function render(body) {
+  const bubble = el("div", { className: "a" });
+  if (!body.answered) {
+    bubble.append(el("span", { className: "muted", textContent: "No answer found in your documents." }));
+  }
+  // One number per distinct (document, page) within this answer.
+  const numbers = new Map();
+  for (const seg of body.answer) {
+    // Text copied verbatim from a document reads as a quotation, not as prose.
+    bubble.append(seg.quote
+      ? el("q", { className: "quote", textContent: seg.text.trim().replace(/\.$/, "") })
+      : seg.text);
+    const seen = new Set();
+    for (const c of seg.citations) {
+      const k = `${c.document_id}#${c.page_no}`;
+      if (!numbers.has(k)) numbers.set(k, numbers.size + 1);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      bubble.append(el("sup", {}, link(`[${numbers.get(k)}]`, c.document_id, c.page_no,
+        `${c.filename || c.doc_type}, page ${c.page_no}\n\n${c.cited_text}`)));
+    }
+  }
+  if (body.sources.length) {
+    bubble.append(el("div", { className: "sources" }, "Sources: ",
+      ...body.sources.map((s) => link(`${s.filename || s.doc_type} p${s.page_no}`,
+        s.document_id, s.page_no, s.doc_type))));
+  }
+  return bubble;
+}
+
+$("#ask").onsubmit = async (e) => {
+  e.preventDefault();
+  const question = $("#q").value.trim();
+  if (!question) return;
+  try { sessionStorage.setItem("key", $("#key").value.trim()); } catch {}
+  if (!turns.length) $("#log").replaceChildren();
+
+  const log = $("#log");
+  const pending = el("div", { className: "a muted", textContent: "Searching your documents..." });
+  log.append(el("div", { className: "q", textContent: question }), pending);
+  log.scrollTop = log.scrollHeight;
+  $("#send").disabled = true;
+
+  try {
+    const body = await (await api("/ask", { method: "POST",
+      body: JSON.stringify({ question, history: turns.slice(-MAX_TURNS) }) })).json();
+    pending.replaceWith(render(body));
+    turns.push({ question, answer: body.answer.map((s) => s.text).join("").slice(0, 4000) });
+    $("#q").value = "";
+  } catch (err) {
+    // The question stays in the box: retrying is one click.
+    pending.replaceWith(el("div", { className: "a err", textContent: err.message }));
+  } finally {
+    $("#send").disabled = false;
+    log.scrollTop = log.scrollHeight;
+    $("#q").focus();
+  }
+};
+
+$("#new").onclick = () => {
+  turns = [];
+  $("#log").replaceChildren(el("p", { className: "muted", textContent: "New chat." }));
+  $("#q").focus();
+};
+</script>
+</body>
+</html>

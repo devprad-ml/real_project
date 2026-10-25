@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     # A field can be on any page, so extraction needs more of the document than
     # classify did.
     extract_max_chars: int = Field(20000, ge=1)
-    # Answers are what staff read directly, so the strongest model; the pipeline
-    # steps above are caught by review when they slip.
-    ask_model: str = "claude-opus-5-5"
+    # Haiku 5.5 at effort medium (answer.py), chosen on cost over Sonnet 5.5 (~12x)
+    # after a live comparison (m12.md §8). Low effort left facts uncited.
+    ask_model: str = "claude-haiku-5-5"
     # Chunks retrieved per question: ~a few thousand input tokens.
     ask_top_k: int = Field(8, ge=1, le=20)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
