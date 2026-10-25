@@ -73,7 +73,7 @@ def collect(db: Session, tenant_id: uuid.UUID) -> dict:
     running, stale = db.execute(
         select(
             func.count(),
-            func.count().filter(Job.locked_at < now - lease),
+            func.count().filter(Job.locked_at < func.now() - lease),  # the DB clock
         ).where(Job.tenant_id == tenant_id, Job.state == JobState.RUNNING)
     ).one()
 

@@ -5,7 +5,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
-from app.storage import get_vector_store
 
 router = APIRouter(tags=["Health"])
 
@@ -16,17 +15,15 @@ def liveness() -> dict[str, str]:
 
 @router.get("/readyz")
 def readiness(db: Session = Depends(get_session)) -> dict[str, str]:
+    ''' Postgres only: every route needs it. Not qdrant: an unready pod is pulled from
+    the load balancer, and qdrant is shared, so a qdrant outage would pull every pod
+    and take review, downloads and webhooks down with search. /search and /ask fail on
+    their own; /admin/stats reports the vector store. '''
     try:
         db.execute(text("SELECT 1"))
     except Exception:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Database unavailable")
-    try:
-        # /ask and /search are down when the vector store is; ready must say so.
-        get_vector_store().ping()
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Vector store unavailable")
     return {"status": "ok"}
     
 

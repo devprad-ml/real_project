@@ -14,13 +14,17 @@ s = get_settings()
 engine = create_engine(
     s.database_url.get_secret_value(),
     pool_pre_ping=True,    # testing pooled connection
-    pool_size=s.db_pool_size,
-    # Every thread that can run a route must be able to get a connection. With the
-    # default 5 + 10 and 40 threads, 40 concurrent requests held 15 connections while
-    # waiting for threads and the other 25 threads waited for connections: a deadlock
-    # that only ended when the 30 s pool timeout turned it into 500s. Connections are
-    # opened on demand, so the ceiling costs nothing until load needs it.
-    max_overflow=s.threadpool_size,
+    # Ceiling = threadpool_size, exactly. Below it: with the default 5 + 10 and 40
+    # threads, 40 requests held 15 connections waiting for threads while 25 threads
+    # waited for connections, a deadlock the 30 s pool timeout turned into 500s. Above
+    # it is waste: limit_inflight admits threadpool_size requests and each holds one
+    # connection. Connections open on demand, so a worker (about 4 in use) never
+    # reaches it.
+    # Budget: api_processes * threadpool_size + workers * 4 < Postgres max_connections
+    # (100 by default). Past that, lower threadpool_size or put PgBouncer in front;
+    # transaction mode is fine, claim_one's FOR UPDATE lives in one transaction.
+    pool_size=min(s.db_pool_size, s.threadpool_size),
+    max_overflow=max(0, s.threadpool_size - s.db_pool_size),
     pool_timeout=10,
 )
 

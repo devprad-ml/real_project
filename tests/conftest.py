@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 # import app factory
 from app.db import SessionLocal  # noqa: E402
 from app import keys, storage  # noqa: E402
-from app.api import documents, health, validation  # noqa: E402
+from app.api import admin, documents, validation  # noqa: E402
 from app.enums import DocumentStatus, DocumentType, Role  # noqa: E402
 from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
@@ -248,7 +248,7 @@ def vectors(monkeypatch):
     store = FakeVectorStore()
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
-    monkeypatch.setattr(health, "get_vector_store", lambda: store)
+    monkeypatch.setattr(admin, "get_vector_store", lambda: store)
     return store
 
 

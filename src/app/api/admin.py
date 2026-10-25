@@ -20,6 +20,7 @@ from app.jobs.queue import enqueue
 from app.models.job import Job
 from app.models.principal import Principal
 from app.observability import stats as stats_mod
+from app.storage import get_vector_store
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 admin = require_role(Role.ADMIN)
@@ -65,4 +66,10 @@ def stats(
     ''' Queue lag, dead letters, stuck jobs and Claude spend for the caller's tenant.
     Tenant-scoped on purpose: ADMIN is a tenant administrator, and a global view would
     show tenant A the counts of tenant B (m13.md §3.4). '''
-    return stats_mod.collect(db, principal.tenant_id)
+    body = stats_mod.collect(db, principal.tenant_id)
+    try:
+        get_vector_store().ping()
+        body["vector_store"] = "ok"
+    except Exception:
+        body["vector_store"] = "unreachable"
+    return body

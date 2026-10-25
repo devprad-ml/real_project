@@ -1,7 +1,7 @@
 import uuid
 import datetime
 
-from sqlalchemy import Index, Integer, Text
+from sqlalchemy import Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import ForeignKey, Enum as SQLEnum
 from sqlalchemy.sql import func
@@ -32,6 +32,12 @@ class Job(Base):
     )
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     run_after: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+    # Database clock (now()), never a worker's: workers on different hosts compare
+    # each other's locks, and a 30 s lease cannot absorb clock skew.
     locked_at: Mapped[datetime.datetime | None] = mapped_column(nullable=True)
+    # Which worker holds a RUNNING job (host:pid). Every write a worker makes to a job
+    # it claimed is conditional on this, so one whose lease was swept cannot finish,
+    # fail or heartbeat the run that another worker took over.
+    locked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
