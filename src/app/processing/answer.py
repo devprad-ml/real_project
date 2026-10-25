@@ -7,6 +7,8 @@ send, and nothing has to be parsed out of the answer text.
 PHI leaves the boundary on every call. Production needs a BAA with Anthropic.
 '''
 
+import time
+
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -93,6 +95,7 @@ def run(
             # An empty answer (a refusal) would be an invalid empty message.
             {"role": "assistant", "content": t.answer or "(no answer)"},
         ]
+    started = time.perf_counter()
     response = llm.client().beta.messages.create(
         model=s.ask_model,
         # A few sentences with citations; well inside a non-streaming request.
@@ -111,6 +114,7 @@ def run(
             }
         ],
     )
+    llm.record("ask", s.ask_model, response, started)
     if response.stop_reason == "refusal":
         return None
 

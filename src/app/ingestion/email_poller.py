@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.ingestion.intake import intake_bytes
 from app.models.client import Client
 from app.models.source import Src
+from app.observability.logging import log
 
 # An email attached to an email attached to an email... Past this it is not a forward,
 # it is a bomb.
@@ -102,13 +103,13 @@ def poll_once(session_factory) -> int:
                 # and no handle to flag: every such message would share the ref
                 # "<user>:<validity>:None", so the first would be ingested and the rest
                 # silently skipped as already-processed.
-                print(f"message from {msg.from_!r} has no uid, skipped")
+                log.warning("message has no uid, skipped")
                 continue
             ref = f"{s.imap_user}:{validity}:{msg.uid}"
             try:
                 count += _ingest(session_factory, msg, ref)
             except Exception as exc:  # one bad message must not stall the mailbox
-                print(f"intake of message {msg.uid} failed: {exc!r}")
+                log.error("intake_failed", extra={"error_type": type(exc).__name__})
                 continue
             mb.flag(msg.uid, MailMessageFlags.SEEN, True)
     return count
@@ -123,7 +124,7 @@ def _ingest(session_factory, msg, ref: str) -> int:
         if client is None:
             # ponytail: dropped and logged. A quarantine mailbox is the upgrade once a
             # misrouted email actually costs something.
-            print(f"message {msg.uid}: no tenant for recipients, dropped")
+            log.warning("no tenant for recipients, message dropped")
             return 0
 
         # Filter before inserting the source: app_user has no UPDATE on sources, so

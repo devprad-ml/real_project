@@ -19,6 +19,7 @@ from app.jobs.handlers import REQUIRES
 from app.jobs.queue import enqueue
 from app.models.job import Job
 from app.models.principal import Principal
+from app.observability import stats as stats_mod
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 admin = require_role(Role.ADMIN)
@@ -55,3 +56,13 @@ def requeue(
     )
     enqueue(db, tenant_id=doc.tenant_id, document_id=doc.id, kind=failed.kind)
     db.commit()
+
+
+@router.get("/stats")
+def stats(
+    principal: Principal = Depends(admin), db: Session = Depends(get_session)
+) -> dict:
+    ''' Queue lag, dead letters, stuck jobs and Claude spend for the caller's tenant.
+    Tenant-scoped on purpose: ADMIN is a tenant administrator, and a global view would
+    show tenant A the counts of tenant B (m13.md §3.4). '''
+    return stats_mod.collect(db, principal.tenant_id)

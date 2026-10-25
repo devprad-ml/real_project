@@ -31,6 +31,9 @@ from app.integrations.signing import sign
 app = FastAPI(title="Mock downstream")
 # Idempotency-Key -> the first response. A replayed key gets that back, nothing else.
 seen: dict[str, dict] = {}
+# Every key it was sent, replays included: bench/crash.py reads this to prove a crashed
+# push was retried (>= 2 requests) without being duplicated (1 distinct key).
+received: list[str] = []
 
 WEBHOOK_TRIES = 5
 
@@ -83,9 +86,18 @@ def receive(
 ) -> dict:
     if random.random() < float(os.environ.get("MOCK_FAIL_RATE", "0")):
         raise HTTPException(503, detail="mock outage")
+    received.append(idempotency_key)
     if idempotency_key in seen:
         return seen[idempotency_key]
     meta = json.loads(metadata)
     seen[idempotency_key] = {"id": str(uuid.uuid4()), "external_id": meta["external_id"]}
-    background.add_task(send_verdict, verdict_for(meta))
+    # MOCK_WEBHOOK_URL=off: benchmarks push thousands of documents and have no API to
+    # call back; each pending verdict would hold a worker thread through its retries.
+    if os.environ.get("MOCK_WEBHOOK_URL") != "off":
+        background.add_task(send_verdict, verdict_for(meta))
     return seen[idempotency_key]
+
+
+@app.get("/_received")
+def received_keys() -> list[str]:
+    return received

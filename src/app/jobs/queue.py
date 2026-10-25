@@ -13,12 +13,6 @@ from app.audit.log import write_audit
 from app.models.document import Document
 from app.models.job import Job
 
-# How long a claimed job may sit in RUNNING before a sweeper assumes the worker
-# that held it died. Must exceed the slowest handler's realistic wall time (OCR on a
-# fat fax), or healthy jobs get stolen and run twice.
-# ponytail: one global lease; per-kind leases when OCR and embed diverge in duration.
-LEASE_SECONDS = 15 * 60
-
 # Exponential backoff stops growing here: past it, a longer wait only delays noticing
 # that the downstream came back.
 BACKOFF_CAP_SECONDS = 15 * 60
@@ -68,14 +62,17 @@ def claim_one(session: Session) -> Job | None:
     )
 
 
-def sweep_stale(session: Session, lease_seconds: int = LEASE_SECONDS) -> int:
+def sweep_stale(session: Session, lease_seconds: int | None = None) -> int:
     ''' Return jobs whose worker died mid-run to the pending pool.
 
     The crash window: a worker marks RUNNING, commits, then dies. Nothing else will
     ever touch that row -- claim_one only looks at PENDING. Without this the job is
     lost silently. Handlers guard on doc.status, so a job that actually finished its
     side effect before the crash re-runs as a no-op. '''
-    cutoff = _utcnow() - datetime.timedelta(seconds=lease_seconds)
+    # A running job refreshes locked_at every heartbeat (jobs/worker.py), so the lease
+    # only has to cover missed heartbeats, not the slowest handler.
+    lease = lease_seconds or get_settings().job_lease_seconds
+    cutoff = _utcnow() - datetime.timedelta(seconds=lease)
     result = session.execute(
         update(Job)
         .where(Job.state == JobState.RUNNING, Job.locked_at < cutoff)

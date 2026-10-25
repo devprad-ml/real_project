@@ -9,6 +9,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.enums import DocumentType
+from app.observability.logging import log
 
 
 class BlobStore(Protocol):
@@ -46,7 +47,7 @@ def _run_blob_deletes(session: Session) -> None:
             # The commit already happened; failing now would report a success as an
             # error. The cost is one orphaned blob.
             # ponytail: orphans are only logged; add a sweep if they accumulate.
-            print(f"orphaned blob {key!r}: {exc!r}")
+            log.warning("orphaned_blob", extra={"error_type": type(exc).__name__})
 
 
 @event.listens_for(Session, "after_rollback")
@@ -86,6 +87,10 @@ class LocalBlobStore:
         return self._path(key).read_bytes()
 
     def delete(self, key: str) -> None:
+        if key.startswith("raw/"):
+            # The record. Nothing in the app deletes it; this makes that a rule, not a
+            # habit. The production equivalent is a WORM policy on the container.
+            raise PermissionError(f"raw/ is the archive, refusing to delete {key!r}")
         # missing_ok: a replayed delete is a no-op, same as S3's DeleteObject.
         self._path(key).unlink(missing_ok=True)
 

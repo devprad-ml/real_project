@@ -81,3 +81,55 @@ def test_hybrid_search_ranks_an_exact_token_match_first(store):
     hits = s.search(name, [1.0, 0.0, 0.0], bm25.encode_query("MBR-0048213"), limit=3)
 
     assert hits[0].payload["text"] == "appeal for member MBR-0048213"
+
+
+def test_ping_reaches_the_real_client_and_raises_when_it_does(monkeypatch):
+    """/readyz relies on QdrantVectorStore.ping existing: the fake store in the health
+    tests would pass even if the real class lacked it (it once did)."""
+    import types
+
+    import pytest
+
+    from app.storage.vectors import QdrantVectorStore
+
+    store = QdrantVectorStore("http://unused", 3)
+    calls = []
+    store._client = types.SimpleNamespace(get_collections=lambda: calls.append(1))
+    store.ping()
+    assert calls == [1]
+
+    def down():
+        raise ConnectionError("refused")
+
+    store._client = types.SimpleNamespace(get_collections=down)
+    with pytest.raises(ConnectionError):
+        store.ping()
+
+
+def test_search_retries_once_on_a_dropped_connection():
+    import types
+
+    import pytest
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    from app.storage.vectors import QdrantVectorStore
+
+    store = QdrantVectorStore("http://unused", 3)
+    calls = []
+
+    def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ResponseHandlingException(ConnectionError("socket closed"))
+        return []
+
+    store._search = flaky
+    assert store.search("c", [0.0, 0.0, 0.0], ([], []), 3) == []
+    assert len(calls) == 2
+
+    calls.clear()
+    store._search = lambda *a, **kw: (_ for _ in ()).throw(
+        ResponseHandlingException(ConnectionError("down"))
+    )
+    with pytest.raises(ResponseHandlingException):
+        store.search("c", [0.0, 0.0, 0.0], ([], []), 3)  # a second failure surfaces

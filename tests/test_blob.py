@@ -10,7 +10,8 @@ def test_put_get_roundtrip(tmp_path):
     store.put("raw/abc/file.pdf", b"hello world", "application/pdf")
 
     assert store.get("raw/abc/file.pdf") == b"hello world"
-    assert store.url("raw/abc/file.pdf") == (tmp_path / "raw/abc/file.pdf").resolve().as_uri()
+    expected = (tmp_path / "raw/abc/file.pdf").resolve().as_uri()
+    assert store.url("raw/abc/file.pdf") == expected
 
 
 # scenario: file is written successfully and maintained atomicity
@@ -49,3 +50,26 @@ def test_failed_write_leaves_no_partial_file(tmp_path, monkeypatch):
     assert not (tmp_path / key).exists()
     assert list((tmp_path / "raw/abc").glob(".*.tmp-*")) == []
     monkeypatch.setattr("os.replace", real_replace)
+
+
+def test_the_raw_archive_cannot_be_deleted(tmp_path):
+    """raw/ is the record: the code has no business removing it (m13.md 3.6)."""
+    store = LocalBlobStore(str(tmp_path))
+    store.put("raw/t/sha/claim.pdf", b"the original", "application/pdf")
+
+    with pytest.raises(PermissionError, match="archive"):
+        store.delete("raw/t/sha/claim.pdf")
+
+    assert store.get("raw/t/sha/claim.pdf") == b"the original"
+
+
+def test_a_derived_copy_can_be_deleted(tmp_path):
+    """Reclassify re-files the normalized PDF and removes the old key."""
+    store = LocalBlobStore(str(tmp_path))
+    store.put("derived/t/d/unknown.pdf", b"copy", "application/pdf")
+
+    store.delete("derived/t/d/unknown.pdf")
+    store.delete("derived/t/d/unknown.pdf")  # a replayed delete is a no-op
+
+    with pytest.raises(FileNotFoundError):
+        store.get("derived/t/d/unknown.pdf")

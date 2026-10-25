@@ -1,5 +1,6 @@
 """ testing code"""
 
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -7,9 +8,11 @@ from dotenv import load_dotenv
 env = Path(__file__).resolve().parent.parent / ".env.test"
 load_dotenv(dotenv_path=env, override=True)
 
+# The API lifespan would load the 90 MB embedder for every `client` fixture.
+os.environ.setdefault("WARM_EMBEDDER", "false")
+
 # import pytest now
 import math  # noqa: E402
-import os  # noqa: E402
 import types  # noqa: E402
 import uuid  # noqa: E402
 
@@ -21,7 +24,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 # import app factory
 from app.db import SessionLocal  # noqa: E402
 from app import keys, storage  # noqa: E402
-from app.api import documents, validation  # noqa: E402
+from app.api import documents, health, validation  # noqa: E402
 from app.enums import DocumentStatus, DocumentType, Role  # noqa: E402
 from app.ingestion import email_poller, intake  # noqa: E402
 from app.jobs import handlers  # noqa: E402
@@ -81,6 +84,7 @@ def _throwaway_tenant():
             )
         for table in (
             "jobs",
+            "llm_usage",
             "audit_log",
             "extracted_fields",
             "associations",
@@ -194,6 +198,11 @@ class FakeVectorStore:
     def __init__(self):
         self.collections: dict[str, dict[str, object]] = {}
         self.upserts = 0  # a replay that writes nothing still must not call upsert
+        self.down = False  # ping() raises, as an unreachable qdrant would
+
+    def ping(self):
+        if self.down:
+            raise ConnectionError("vector store down")
 
     def upsert(self, collection, points):
         self.upserts += 1
@@ -239,6 +248,7 @@ def vectors(monkeypatch):
     store = FakeVectorStore()
     monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
+    monkeypatch.setattr(health, "get_vector_store", lambda: store)
     return store
 
 

@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     # Push waits out downstream outages: with the 15-min backoff cap and jitter, 30
     # attempts is 2.6-5.3 h of retrying before FAILED (m10.md §3).
     push_max_attempts: int = Field(30, ge=1)
+    # A running job refreshes its lock every heartbeat, so a lock this stale means its
+    # worker died. Kill-to-reclaim is at most lease + sweep = 45 s (m13.md §2.1).
+    job_lease_seconds: int = Field(30, ge=1)
+    job_heartbeat_seconds: int = Field(10, ge=1)
+    sweep_seconds: int = Field(15, ge=1)
+    # Load the embedder at API startup instead of on the first /ask (19 s, m12.md §7).
+    warm_embedder: bool = True
+    log_level: str = "INFO"
+    # Threads that run sync routes (anyio's default is also 40). The DB pool is sized
+    # from it in db.py: a request holds its connection while it waits for a thread, so
+    # fewer connections than threads deadlocks under load (m13.md §8).
+    threadpool_size: int = Field(40, ge=1)
+    db_pool_size: int = Field(10, ge=1)
+    # Requests over threadpool_size wait here, holding no thread and no connection; past
+    # this they get a 503 instead of an unbounded queue.
+    queue_timeout_seconds: float = Field(10, gt=0)
     qdrant_url: str = "http://localhost:6333"
     # embed_dim must match embed_model's output width -- a collection is created with
     # a fixed vector size, so swapping the model means a new collection, not a reuse.

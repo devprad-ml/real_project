@@ -7,6 +7,7 @@ the document from scratch.
 PHI leaves the boundary on every call. Production needs a BAA with Anthropic.
 '''
 
+import time
 from typing import Iterable
 
 import anthropic
@@ -66,6 +67,7 @@ def run(doc_type: DocumentType, pages: Iterable[str]) -> ExtractionResult | None
     expected = FIELD_SCHEMAS.get(doc_type, [])
     field_list = ", ".join(expected) if expected else "(none -- write a summary only)"
 
+    started = time.perf_counter()
     try:
         response = llm.client().messages.parse(
             model=s.extract_model,
@@ -87,6 +89,8 @@ def run(doc_type: DocumentType, pages: Iterable[str]) -> ExtractionResult | None
     except anthropic.BadRequestError as exc:
         # A 400 fails the same way on every retry.
         raise PermanentError(f"extract request rejected: {exc.message}") from exc
+
+    llm.record("extract", s.extract_model, response, started)
 
     if response.stop_reason == "refusal" or response.parsed_output is None:
         return None

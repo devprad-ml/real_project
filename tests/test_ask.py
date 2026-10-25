@@ -43,7 +43,9 @@ def claude(monkeypatch):
             if self.error:
                 raise self.error
             return types.SimpleNamespace(
-                content=self.content, stop_reason=self.stop_reason
+                content=self.content,
+                stop_reason=self.stop_reason,
+                usage=types.SimpleNamespace(input_tokens=2400, output_tokens=310),
             )
 
     fake = Fake()
@@ -304,3 +306,15 @@ def test_text_copied_from_a_cited_chunk_is_marked_as_a_quote(
     segments = ask(client, staff()).json()["answer"]
 
     assert [s["quote"] for s in segments] == [True, False, False]
+
+
+def test_the_ask_is_recorded_in_the_spend_ledger(client, staff, tenant, two_docs, claude):
+    from app.models.llm_usage import LlmUsage
+
+    ask(client, staff())
+
+    with SessionLocal() as s:
+        [row] = s.scalars(select(LlmUsage).where(LlmUsage.tenant_id == tenant)).all()
+    assert (row.purpose, row.model) == ("ask", "claude-haiku-5-5")
+    assert (row.input_tokens, row.output_tokens) == (2400, 310)
+    assert row.document_id is None  # a question spans documents

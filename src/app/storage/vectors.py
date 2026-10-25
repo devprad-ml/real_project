@@ -59,6 +59,7 @@ class VectorStore(Protocol):
         self, collection: str, vector: list[float], sparse: Sparse, limit: int
     ) -> list[Hit]: ...
     def drop(self, collection: str) -> None: ...
+    def ping(self) -> None: ...  # raises when the store is unreachable
 
 
 def tenant_collection(tenant_id: uuid.UUID) -> str:
@@ -141,6 +142,19 @@ class QdrantVectorStore:
     def search(
         self, collection: str, vector: list[float], sparse: Sparse, limit: int
     ) -> list[Hit]:
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        # One retry: under ~40 concurrent threads the shared connection pool hands out
+        # a socket that was just closed (WinError 10038 on Windows), about 0.3% of
+        # requests in the /search load test (m13.md §8). A read is safe to repeat.
+        try:
+            return self._search(collection, vector, sparse, limit)
+        except ResponseHandlingException:
+            return self._search(collection, vector, sparse, limit)
+
+    def _search(
+        self, collection: str, vector: list[float], sparse: Sparse, limit: int
+    ) -> list[Hit]:
         ''' Hybrid, best first: dense and bm25 legs fused with RRF in one call. A
         tenant whose first document has not reached EMBEDDED has no collection yet
         (`_ensure` creates it on first write): that is an empty result, not an error. '''
@@ -167,6 +181,9 @@ class QdrantVectorStore:
         return [
             Hit(id=str(p.id), score=p.score, payload=p.payload or {}) for p in res.points
         ]
+
+    def ping(self) -> None:
+        self.client.get_collections()
 
     def drop(self, collection: str) -> None:
         ''' Tenant offboarding, reindex and test teardown. Rebuildable: the text is in

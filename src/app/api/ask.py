@@ -13,7 +13,7 @@ from app.db import get_session
 from app.deps import actor, require_role
 from app.enums import DocumentType
 from app.models.principal import Principal
-from app.processing import answer
+from app.processing import answer, llm
 from app.search.retrieve import audit_views, retrieve
 
 router = APIRouter(tags=["Ask"])
@@ -76,6 +76,7 @@ def ask(
     # concurrent asks would drain the pool and stall every other route.
     db.close()
 
+    llm.scope.set((principal.tenant_id, None))
     try:
         segments = answer.run(body.question, hits, body.history)
     except anthropic.BadRequestError:
