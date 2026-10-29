@@ -18,12 +18,12 @@ def test_readiness(client, vectors):
     assert response.json() == {"status":"ok"}
 
 
-def test_readiness_fails_when_the_vector_store_is_down(client, vectors):
-    """/ask and /search need qdrant; a ready pod that cannot search is not ready."""
+def test_readiness_ignores_the_vector_store(client, vectors):
+    """qdrant is shared: failing readiness on it would pull every pod at once and turn
+    a search outage into a total one."""
     vectors.down = True
     response = client.get("/readyz")
-    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
-    assert response.json()["detail"] == "Vector store unavailable"
+    assert response.status_code == status.HTTP_200_OK
 
 
 # testing /readyz failure 
@@ -53,7 +53,8 @@ def test_every_route_thread_can_get_a_database_connection():
     from app.db import engine
 
     capacity = engine.pool.size() + engine.pool._max_overflow
-    assert capacity >= get_settings().threadpool_size
+    # Exactly: more only spends Postgres connections that admission control never uses.
+    assert capacity == get_settings().threadpool_size
 
 
 class _Limiter:

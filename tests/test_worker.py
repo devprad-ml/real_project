@@ -9,6 +9,7 @@ import datetime
 import time
 
 import pytest
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
@@ -16,7 +17,7 @@ from app.db import SessionLocal
 from app.enums import DocumentStatus, JobKind, JobState
 from app.errors import PermanentError
 from app.jobs import worker
-from app.jobs.queue import enqueue
+from app.jobs.queue import enqueue, owner
 from app.models import Document, Job
 from app.processing import pdftext
 
@@ -104,6 +105,74 @@ def test_successful_job_is_marked_done_and_unlocked(tenant, make_doc, monkeypatc
         assert job.state == JobState.DONE
         assert job.locked_at is None
         assert job.attempts == 0
+
+
+def _taken_over(job_id):
+    """What a sweep plus another worker's claim leave behind while this one still runs."""
+    with SessionLocal() as s:
+        s.execute(update(Job).where(Job.id == job_id).values(locked_by="peer:1"))
+        s.commit()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_run_whose_lease_was_taken_writes_nothing(
+    tenant, make_doc, monkeypatch, raises
+):
+    """Worker A is cut off past the lease, the job is swept and B claims it. When A's
+    handler returns (or fails) it must not mark B's job done, count an attempt against
+    it, or commit its own document writes."""
+    doc = make_doc()
+    job_id = _seed_job(tenant, doc)
+
+    def handler(session, d):
+        _taken_over(job_id)
+        d.page_count = 99
+        if raises:
+            raise RuntimeError("late failure")
+
+    _stub(monkeypatch, JobKind.NORMALIZE, handler)
+    assert worker.run_once() is True
+
+    with SessionLocal() as s:
+        job = s.get(Job, job_id)
+        assert (job.state, job.locked_by, job.attempts) == (JobState.RUNNING, "peer:1", 0)
+        assert s.get(Document, doc.id).page_count != 99
+
+
+def test_claim_records_the_owner_and_done_clears_it(tenant, make_doc, monkeypatch):
+    doc = make_doc()
+    job_id = _seed_job(tenant, doc)
+    seen = {}
+
+    def handler(session, d):
+        with SessionLocal() as s:
+            seen["owner"] = s.get(Job, job_id).locked_by
+
+    _stub(monkeypatch, JobKind.NORMALIZE, handler)
+    worker.run_once()
+
+    assert seen["owner"] == owner()
+    with SessionLocal() as s:
+        assert s.get(Job, job_id).locked_by is None
+
+
+def test_a_heartbeat_never_refreshes_a_peers_lock(tenant, make_doc):
+    doc = make_doc()
+    with SessionLocal() as s:
+        job = enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.NORMALIZE)
+        job.state = JobState.RUNNING
+        job.locked_at = func.now() - datetime.timedelta(hours=1)
+        job.locked_by = "peer:1"
+        s.commit()
+        job_id = job.id
+
+    hk = worker.Housekeeper()
+    hk.hold(job_id)
+    hk._beat()
+
+    with SessionLocal() as s:
+        age = s.scalar(select(func.now() - Job.locked_at).where(Job.id == job_id))
+    assert age > datetime.timedelta(minutes=50)
 
 
 def test_a_raising_handler_leaves_the_document_untouched(tenant, make_doc, monkeypatch):
@@ -239,7 +308,8 @@ def test_a_heartbeat_keeps_a_job_alive_past_the_lease_and_silence_loses_it(
     with SessionLocal() as s:
         job = enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.NORMALIZE)
         job.state = JobState.RUNNING
-        job.locked_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        job.locked_at = func.now()
+        job.locked_by = owner()
         s.commit()
         job_id = job.id
 

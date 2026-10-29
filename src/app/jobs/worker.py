@@ -5,13 +5,12 @@ The API never does slow work; everything expensive happens here. Scale by runnin
 copies -- SKIP LOCKED makes that safe with no coordination between them.
 '''
 
-import datetime
 import signal
 import threading
 import time
 import uuid
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from app.config import get_settings
@@ -20,7 +19,7 @@ from app.enums import JobState
 from app.errors import PermanentError
 from app.ingestion.email_poller import poll_once
 from app.jobs.handlers import HANDLERS
-from app.jobs.queue import _utcnow, claim_one, fail_with_backoff, sweep_stale
+from app.jobs.queue import claim_one, fail_with_backoff, owner, sweep_stale
 from app.models.document import Document
 from app.models.job import Job
 from app.observability.logging import configure, log
@@ -86,8 +85,12 @@ class Housekeeper(threading.Thread):
             with SessionLocal() as session:
                 session.execute(
                     update(Job)
-                    .where(Job.id == job_id, Job.state == JobState.RUNNING)
-                    .values(locked_at=_utcnow())
+                    .where(
+                        Job.id == job_id,
+                        Job.state == JobState.RUNNING,
+                        Job.locked_by == owner(),  # never refresh a peer's lock
+                    )
+                    .values(locked_at=func.now())
                 )
                 session.commit()
         except Exception as exc:  # a missed beat is survivable; a dead thread is not
@@ -130,7 +133,8 @@ def run_once() -> bool:
             session.commit()
             return False
         job.state = JobState.RUNNING
-        job.locked_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        job.locked_at = func.now()
+        job.locked_by = owner()
         session.commit()
         job_id = job.id
 
@@ -162,8 +166,23 @@ def _run_claimed(job_id: uuid.UUID, started: float) -> None:
             if handler is None:
                 raise PermanentError(f"no handler for kind {job_kind!r}")
             handler(session, doc)
-            job.state = JobState.DONE
-            job.locked_at = None
+            # Finish only a run this worker still owns. If the lease was swept (the
+            # database was unreachable past it) another worker may be running the job
+            # now: drop this run's writes and let that one finish. The UPDATE's row
+            # lock orders it against a concurrent sweep.
+            finished = session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.state == JobState.RUNNING,
+                    Job.locked_by == owner(),
+                )
+                .values(state=JobState.DONE, locked_at=None, locked_by=None)
+            ).rowcount
+            if not finished:
+                session.rollback()
+                log.warning("job_lease_lost", extra=ids)
+                return
             session.commit()
             log.info(
                 "job_done",
@@ -175,7 +194,12 @@ def _run_claimed(job_id: uuid.UUID, started: float) -> None:
             session.rollback()
             permanent = isinstance(exc, PermanentError)
             with SessionLocal() as fail_session:
-                failed = fail_session.get(Job, job_id)
+                failed = fail_session.get(Job, job_id, with_for_update=True)
+                if failed.state != JobState.RUNNING or failed.locked_by != owner():
+                    # Swept and maybe re-claimed: the attempt count is the new
+                    # owner's to keep, not this stale run's.
+                    log.warning("job_lease_lost", extra=ids)
+                    return
                 fail_with_backoff(fail_session, failed, repr(exc), permanent=permanent)
                 fail_session.commit()
                 attempts = failed.attempts

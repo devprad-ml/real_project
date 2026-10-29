@@ -114,6 +114,16 @@ def test_llm_spend_by_purpose_and_model_over_24_hours(client, staff, seeded):
     assert ("ask", "claude-haiku-5-5") not in llm
 
 
+def test_stats_report_the_vector_store_readiness_does_not_check(
+    client, staff, tenant, vectors
+):
+    assert client.get("/admin/stats", headers=staff(Role.ADMIN)).json()[
+        "vector_store"] == "ok"
+    vectors.down = True
+    body = client.get("/admin/stats", headers=staff(Role.ADMIN)).json()
+    assert body["vector_store"] == "unreachable"
+
+
 def test_stats_are_admin_only(client, staff, seeded):
     assert client.get("/admin/stats").status_code == 401
     assert client.get("/admin/stats", headers=staff(Role.REVIEWER)).status_code == 403

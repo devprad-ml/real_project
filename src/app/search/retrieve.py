@@ -41,7 +41,7 @@ def retrieve(
     # comparable, so there is exactly one place a vector can come from.
     vector = embed.encode([query])[0]
     hits = get_vector_store().search(
-        tenant_collection(tenant_id), vector, bm25.encode_query(query), limit
+        tenant_collection(tenant_id), vector, bm25.encode_query(query), limit, query
     )
     if not hits:
         return []

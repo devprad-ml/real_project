@@ -42,7 +42,7 @@ def test_the_nearest_point_comes_back_first_with_its_payload(store):
     s, name = store
     s.upsert(name, [pt([0.0, 1.0, 0.0], "far"), pt([1.0, 0.1, 0.0], "near")])
 
-    hits = s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=10)
+    hits = s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=10, text="")
 
     assert [h.payload["text"] for h in hits] == ["near", "far"]
     assert hits[0].score > hits[1].score
@@ -50,7 +50,7 @@ def test_the_nearest_point_comes_back_first_with_its_payload(store):
 
 def test_a_missing_collection_is_an_empty_result(store):
     s, name = store
-    assert s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=5) == []
+    assert s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=5, text="") == []
 
 
 def test_an_upsert_of_an_existing_id_overwrites(store):
@@ -61,7 +61,7 @@ def test_an_upsert_of_an_existing_id_overwrites(store):
     s.upsert(name, [Point(same_id, [1.0, 0.0, 0.0], {"text": "second"})])
 
     assert s.client.count(name).count == 1
-    [hit] = s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=5)
+    [hit] = s.search(name, [1.0, 0.0, 0.0], NO_KEYWORDS, limit=5, text="")
     assert hit.payload["text"] == "second"
 
 
@@ -78,7 +78,8 @@ def test_hybrid_search_ranks_an_exact_token_match_first(store):
         ],
     )
 
-    hits = s.search(name, [1.0, 0.0, 0.0], bm25.encode_query("MBR-0048213"), limit=3)
+    hits = s.search(name, [1.0, 0.0, 0.0], bm25.encode_query("MBR-0048213"),
+                    limit=3, text="MBR-0048213")
 
     assert hits[0].payload["text"] == "appeal for member MBR-0048213"
 
@@ -124,7 +125,7 @@ def test_search_retries_once_on_a_dropped_connection():
         return []
 
     store._search = flaky
-    assert store.search("c", [0.0, 0.0, 0.0], ([], []), 3) == []
+    assert store.search("c", [0.0, 0.0, 0.0], ([], []), 3, "") == []
     assert len(calls) == 2
 
     calls.clear()
@@ -132,4 +133,4 @@ def test_search_retries_once_on_a_dropped_connection():
         ResponseHandlingException(ConnectionError("down"))
     )
     with pytest.raises(ResponseHandlingException):
-        store.search("c", [0.0, 0.0, 0.0], ([], []), 3)  # a second failure surfaces
+        store.search("c", [0.0, 0.0, 0.0], ([], []), 3, "")  # a second failure surfaces

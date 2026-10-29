@@ -1,10 +1,12 @@
 ''' The queue is a Postgres table. Claim with SELECT ... FOR UPDATE SKIP LOCKED. '''
 
 import datetime
+import os
 import random
+import socket
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -47,6 +49,12 @@ def enqueue(
     return job
 
 
+def owner() -> str:
+    ''' This process, as written to jobs.locked_by. Computed per call, not at import:
+    a forked child has its own pid. '''
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
 def claim_one(session: Session) -> Job | None:
     ''' Take the oldest due pending job, locking it against other workers.
 
@@ -72,11 +80,13 @@ def sweep_stale(session: Session, lease_seconds: int | None = None) -> int:
     # A running job refreshes locked_at every heartbeat (jobs/worker.py), so the lease
     # only has to cover missed heartbeats, not the slowest handler.
     lease = lease_seconds or get_settings().job_lease_seconds
-    cutoff = _utcnow() - datetime.timedelta(seconds=lease)
+    # The database clock on both sides of the comparison: locked_at is written by
+    # now() too, so skew between worker hosts cannot make a healthy lock look stale.
+    cutoff = func.now() - datetime.timedelta(seconds=lease)
     result = session.execute(
         update(Job)
         .where(Job.state == JobState.RUNNING, Job.locked_at < cutoff)
-        .values(state=JobState.PENDING, locked_at=None)
+        .values(state=JobState.PENDING, locked_at=None, locked_by=None)
     )
     return result.rowcount
 
@@ -95,6 +105,7 @@ def fail_with_backoff(
     job.attempts += 1
     job.last_error = err[:2000]
     job.locked_at = None
+    job.locked_by = None
 
     if permanent or job.attempts >= limit:
         job.state = JobState.ERROR

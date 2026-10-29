@@ -55,8 +55,13 @@ class Hit:
 
 class VectorStore(Protocol):
     def upsert(self, collection: str, points: list[Point]) -> None: ...
+    # `sparse` is the query as bm25 term weights (qdrant's keyword leg); `text` is the
+    # same query as plain text (Azure AI Search runs BM25 itself). Each backend uses
+    # the one it needs and ignores the other. Required, not defaulted: a caller that
+    # forgot `text` would silently turn Azure's hybrid search into vector-only.
     def search(
-        self, collection: str, vector: list[float], sparse: Sparse, limit: int
+        self, collection: str, vector: list[float], sparse: Sparse, limit: int,
+        text: str,
     ) -> list[Hit]: ...
     def drop(self, collection: str) -> None: ...
     def ping(self) -> None: ...  # raises when the store is unreachable
@@ -140,7 +145,8 @@ class QdrantVectorStore:
         )
 
     def search(
-        self, collection: str, vector: list[float], sparse: Sparse, limit: int
+        self, collection: str, vector: list[float], sparse: Sparse, limit: int,
+        text: str,
     ) -> list[Hit]:
         from qdrant_client.http.exceptions import ResponseHandlingException
 
@@ -154,7 +160,7 @@ class QdrantVectorStore:
 
     def _search(
         self, collection: str, vector: list[float], sparse: Sparse, limit: int
-    ) -> list[Hit]:
+    ) -> list[Hit]:  # `text` is for Azure; this store searches on `sparse`
         ''' Hybrid, best first: dense and bm25 legs fused with RRF in one call. A
         tenant whose first document has not reached EMBEDDED has no collection yet
         (`_ensure` creates it on first write): that is an empty result, not an error. '''

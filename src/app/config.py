@@ -51,7 +51,13 @@ class Settings(BaseSettings):
     # Requests over threadpool_size wait here, holding no thread and no connection; past
     # this they get a 503 instead of an unbounded queue.
     queue_timeout_seconds: float = Field(10, gt=0)
+    # Which VectorStore the app uses: "qdrant" (local, the default) or "azure" (Azure AI
+    # Search). Switching needs `python -m app.jobs.reindex`; the stores share no data.
+    vector_backend: str = "qdrant"
     qdrant_url: str = "http://localhost:6333"
+    azure_search_endpoint: str = ""
+    azure_search_api_key: SecretStr | None = None
+    azure_search_index: str = "chunks"
     # embed_dim must match embed_model's output width -- a collection is created with
     # a fixed vector size, so swapping the model means a new collection, not a reuse.
     embed_model: str = "all-MiniLM-L6-v2"
