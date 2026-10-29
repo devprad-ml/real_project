@@ -210,7 +210,7 @@ class FakeVectorStore:
         for p in points:
             target[p.id] = p
 
-    def search(self, collection, vector, sparse, limit):
+    def search(self, collection, vector, sparse, limit, text):
         """Hybrid like the real store: rank by cosine, rank by sparse dot product
         (points with no shared term sit out that leg), fuse with RRF. A missing
         collection is an empty result, same as the real store."""

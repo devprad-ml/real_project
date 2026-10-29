@@ -15,9 +15,21 @@ def get_blob_store() -> BlobStore:
 
 @lru_cache
 def get_vector_store() -> VectorStore:
-    # One impl, so no backend switch -- add one when a second store exists, not now.
     s = get_settings()
-    return QdrantVectorStore(s.qdrant_url, s.embed_dim)
+    if s.vector_backend == "qdrant":
+        return QdrantVectorStore(s.qdrant_url, s.embed_dim)
+    if s.vector_backend == "azure":
+        if not (s.azure_search_endpoint and s.azure_search_api_key):
+            raise ValueError("vector_backend=azure needs the endpoint and the api key")
+        from app.storage.azure_search import AzureSearchVectorStore
+
+        return AzureSearchVectorStore(
+            s.azure_search_endpoint,
+            s.azure_search_api_key.get_secret_value(),
+            s.embed_dim,
+            s.azure_search_index,
+        )
+    raise ValueError(f"unknown vector_backend: {s.vector_backend!r}")
 
 
 def move_normalized(session, doc, pdfa: bytes) -> None:
