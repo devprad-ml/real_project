@@ -72,8 +72,10 @@ def run(doc_type: DocumentType, pages: Iterable[str]) -> ExtractionResult | None
         response = llm.client().messages.parse(
             model=s.extract_model,
             max_tokens=2048,
-            # Structured extraction, not open-ended reasoning.
-            thinking={"type": "disabled"},
+            # Structured extraction, not open-ended reasoning. Sonnet 5.5 rejects
+            # {"type": "disabled"} with a 400; this is its off switch (found live in the
+            # M13 demo; Haiku, used by classify, still takes "disabled").
+            thinking={"type": "between_tools"},
             system=SYSTEM,
             messages=[
                 {
