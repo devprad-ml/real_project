@@ -5,8 +5,7 @@ derived blob key, so retention / legal hold on the original is unaffected.
 
 ocrmypdf, img2pdf and pypdf are imported inside the functions that need them: they pull
 Tesseract + Ghostscript, which are not installed on a bare Windows host. Keeping the
-imports local means the queue, the worker loop and their tests run without an OCR
-toolchain present.
+imports local means the app and its tests run without an OCR toolchain present.
 '''
 
 import io
@@ -115,30 +114,42 @@ def page_count(pdf: bytes) -> int:
     return len(PdfReader(io.BytesIO(pdf)).pages)
 
 
-def to_pdfa(pdf: bytes, *, born_digital: bool) -> bytes:
-    ''' PDF/A-2b with a text layer, via ocrmypdf.
-
-    Born-digital: --skip-text only, no deskew/clean. Those rasterize the page, and a
-    PDF that was generated rather than scanned is neither skewed nor speckled -- the
-    preprocessing would only degrade it. Scans get the full treatment.
-    '''
+def to_pdfa(pdf: bytes) -> bytes:
+    ''' PDF/A-2b with a text layer, via ocrmypdf. Scans only -- a born-digital PDF
+    already has a text layer and never reaches this call (see run()); OCRing it would
+    rasterize perfectly good text and, for a fillable form, strip the AcroForm that
+    carries the actual field values. '''
     import ocrmypdf
 
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "in.pdf"
         dst = Path(tmp) / "out.pdf"
         src.write_bytes(pdf)
-        opts: dict = {"output_type": "pdfa", "progress_bar": False}
-        if born_digital:
-            opts["skip_text"] = True
-        else:
-            opts.update(deskew=True, rotate_pages=True, clean=True)
+        opts = {
+            "output_type": "pdfa", "progress_bar": False,
+            "deskew": True, "rotate_pages": True,
+            # The default of 14 left a page scanned sideways unrotated, which came back
+            # with no text at all.
+            "rotate_pages_threshold": 2.0,
+            # A short letter falls under the text-layer threshold but has text, and a
+            # mixed PDF has both kinds of page: OCR only the pages that need it.
+            "skip_text": True,
+            # Despeckle is a nicety: without unpaper, ocrmypdf would refuse the whole
+            # document if this were set, and OCR works fine without it.
+            "clean": shutil.which("unpaper") is not None,
+        }
         ocrmypdf.ocr(src, dst, **opts)
         return dst.read_bytes()
 
 
 def run(data: bytes) -> tuple[bytes, int]:
-    ''' The whole normalize step: record bytes -> (PDF/A bytes, page count). '''
+    ''' The whole normalize step: record bytes -> (normalized PDF bytes, page count).
+
+    A born-digital PDF (real text layer, or a fillable form with field values) is
+    returned as-is: OCR would gain nothing and, for a fillable form, destroys the
+    AcroForm that pdftext reads field values from. Only a scan goes through OCR. '''
     pdf = to_pdf(sniff(data), data)
-    pdfa = to_pdfa(pdf, born_digital=has_text_layer(pdf))
+    if has_text_layer(pdf):
+        return pdf, page_count(pdf)
+    pdfa = to_pdfa(pdf)
     return pdfa, page_count(pdfa)

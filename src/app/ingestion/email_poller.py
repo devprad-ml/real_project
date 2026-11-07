@@ -1,6 +1,7 @@
 ''' IMAP channel. Everything mailbox-specific lives in this file, so a Graph API
 connector later replaces only this file. '''
 
+import datetime
 import email.message
 import email.utils
 from typing import Iterator
@@ -9,6 +10,7 @@ from imap_tools import AND, MailBox, MailMessageFlags
 from sqlalchemy import func, select
 
 from app.config import get_settings
+from app.ingestion import pipeline
 from app.ingestion.intake import intake_bytes
 from app.models.client import Client
 from app.models.source import Src
@@ -62,6 +64,12 @@ def _attachments(
     yield filename, payload
 
 
+def _sent_at(msg) -> str | None:
+    ''' The email's own Date header. imap_tools reports a missing or unparseable one as
+    the year 1900. '''
+    return msg.date.isoformat() if msg.date.year > 1900 else None
+
+
 def _tenant_for(session, msg) -> Client | None:
     for header in _RECIPIENT_HEADERS:
         for _, addr in email.utils.getaddresses(msg.headers.get(header, ())):
@@ -92,11 +100,20 @@ def poll_once(session_factory) -> int:
         # UIDs are only unique within one UIDVALIDITY epoch; a rebuilt mailbox restarts
         # them, and without this a new message could collide with an old ref.
         validity = mb.folder.status(s.imap_mailbox)["UIDVALIDITY"]
+        # The lookback floor: without it, the first poll against a mailbox that
+        # already has years of unread mail (a reused personal inbox, a mailbox wired
+        # up mid-migration) tries to ingest all of it as documents.
+        since = None
+        if s.imap_lookback_days:
+            since = datetime.date.today() - datetime.timedelta(
+                days=s.imap_lookback_days
+            )
+        criteria = AND(seen=False, date_gte=since) if since else AND(seen=False)
         # bulk=True holds the batch in memory, so it needs a ceiling: a backlog of
         # thousands of unseen messages would otherwise be fetched in one go. The
         # remainder is picked up by the next poll.
         for msg in mb.fetch(
-            AND(seen=False), mark_seen=False, bulk=True, limit=s.imap_batch_size
+            criteria, mark_seen=False, bulk=True, limit=s.imap_batch_size
         ):
             if msg.uid is None:
                 # Some servers return no UID. Without one there is no ref to dedupe on
@@ -143,6 +160,7 @@ def _ingest(session_factory, msg, ref: str) -> int:
             raw_meta={
                 "from": msg.from_,
                 "subject": msg.subject,
+                "sent_at": _sent_at(msg),
                 "message_id": (msg.headers.get("message-id") or ("",))[0],
                 "skipped": skipped,
             },
@@ -150,7 +168,7 @@ def _ingest(session_factory, msg, ref: str) -> int:
         session.add(source)
         session.flush()
 
-        new = 0
+        new = []
         for filename, payload in accepted:
             doc = intake_bytes(
                 session,
@@ -159,6 +177,9 @@ def _ingest(session_factory, msg, ref: str) -> int:
                 filename=filename,
                 source_id=source.id,
             )
-            new += doc is not None
+            if doc is not None:
+                new.append(doc.id)
         session.commit()
-        return new
+    for document_id in new:
+        pipeline.submit(document_id)
+    return len(new)

@@ -6,11 +6,9 @@ import types
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.enums import DocumentStatus, JobKind
-from app.jobs import worker
-from app.jobs.queue import enqueue
+from app.ingestion import pipeline
 from app.models.llm_usage import LlmUsage
-from app.processing import classify, llm
+from app.rag import classify, llm
 
 
 def _response(tin=120, tout=30):
@@ -88,37 +86,32 @@ def test_classify_records_its_call(tenant, make_doc, monkeypatch):
     assert (row.purpose, row.input_tokens, row.output_tokens) == ("classify", 700, 40)
 
 
-def test_the_spend_survives_the_job_failing_afterwards(tenant, make_doc, monkeypatch):
-    """The handler's session is rolled back when the job fails. The ledger row was
-    committed on its own session, because the money was spent either way."""
-    doc = make_doc(DocumentStatus.RECEIVED)
+def test_the_spend_survives_the_document_failing_afterwards(
+    tenant, make_doc, monkeypatch
+):
+    """A failure rolls the document's session back. The ledger row was committed on
+    its own session, because the money was spent either way."""
+    doc = make_doc()
 
-    def handler(session, d):
+    def run(d):
         llm.record(
-            "extract", "claude-sonnet-5-5", _response(900, 80), time.perf_counter()
+            "classify", "claude-haiku-5-5", _response(900, 80), time.perf_counter()
         )
         raise RuntimeError("fell over after paying for the call")
 
-    monkeypatch.setitem(worker.HANDLERS, JobKind.NORMALIZE, handler)
-    with SessionLocal() as s:
-        enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.NORMALIZE)
-        s.commit()
+    monkeypatch.setattr(pipeline, "_run", run)
 
-    assert worker.run_once() is True
+    pipeline.process(doc.id)
 
     [row] = _rows(tenant)
-    assert (row.document_id, row.purpose) == (doc.id, "extract")
+    assert (row.document_id, row.purpose) == (doc.id, "classify")
     assert row.input_tokens == 900
 
 
-def test_the_scope_does_not_leak_between_jobs(tenant, make_doc, monkeypatch):
-    """Reset after each job: a later call with no scope must not bill the last job."""
-    doc = make_doc(DocumentStatus.RECEIVED)
-    monkeypatch.setitem(worker.HANDLERS, JobKind.NORMALIZE, lambda s, d: None)
-    with SessionLocal() as s:
-        enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.NORMALIZE)
-        s.commit()
+def test_the_scope_does_not_leak_between_documents(make_doc, monkeypatch):
+    """Reset after each one: a later call with no scope must not bill the last one."""
+    monkeypatch.setattr(pipeline, "_run", lambda d: {})
 
-    worker.run_once()
+    pipeline.process(make_doc().id)
 
     assert llm.scope.get() is None

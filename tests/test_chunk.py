@@ -3,7 +3,7 @@ rather than shape checks -- chunking is the part of `embed` that silently degrad
 retrieval if it drifts, and nothing downstream would fail loudly.
 """
 
-from app.processing.chunk import CHUNK_CHARS, OVERLAP_CHARS, chunk_page, chunk_pages
+from app.rag.chunk import CHUNK_CHARS, OVERLAP_CHARS, chunk_page, chunk_pages
 
 
 def test_short_text_is_one_chunk():

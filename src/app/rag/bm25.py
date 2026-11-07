@@ -24,6 +24,13 @@ AVG_LEN = 160
 # ponytail: no stemming or stopwords, so "denied" does not match "denial". Dense covers
 # paraphrase; add fastembed's bm25 if word-form recall turns out to matter.
 _TOKEN = re.compile(r"[a-z0-9]+")
+# Dropped from queries only: in "how many days do I have to appeal claim C-7113" the
+# filler words together outscored the one claim number that mattered.
+_STOPWORDS = frozenset(
+    "a an and any are at be been by can did do does for from had has have how i in is it "
+    "its me my of on or our that the their them they this to us was we were what when "
+    "where which who whom why will with would you your".split()
+)
 
 Sparse = tuple[list[int], list[float]]
 
@@ -34,7 +41,7 @@ def tokens(text: str) -> list[str]:
 
 def _index(token: str) -> int:
     # crc32, not hash(): Python salts str hashes per process, and these indices must
-    # match between the worker that wrote a chunk and the API that queries it.
+    # match between the process that wrote a chunk and the one that queries it.
     return zlib.crc32(token.encode())
 
 
@@ -49,6 +56,8 @@ def encode_doc(text: str) -> Sparse:
 
 
 def encode_query(text: str) -> Sparse:
-    ''' One per distinct term: the query side of BM25 carries no tf weighting. '''
-    indices = sorted({_index(t) for t in tokens(text)})
+    ''' One per distinct term: the query side of BM25 carries no tf weighting. A query of
+    nothing but stopwords keeps them, rather than losing its keyword leg. '''
+    toks = tokens(text)
+    indices = sorted({_index(t) for t in [t for t in toks if t not in _STOPWORDS] or toks})
     return indices, [1.0] * len(indices)

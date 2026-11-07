@@ -15,7 +15,7 @@ import uuid
 import pytest
 
 from app.config import get_settings
-from app.processing import bm25
+from app.rag import bm25
 from app.storage.vectors import Point, QdrantVectorStore
 
 DOWN = [1.0, 0.0, 0.0]

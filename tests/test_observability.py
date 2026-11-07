@@ -6,10 +6,8 @@ import logging
 
 import pytest
 
-from app.db import SessionLocal
-from app.enums import DocumentStatus, JobKind, Role
-from app.jobs import worker
-from app.jobs.queue import enqueue
+from app.enums import Role
+from app.ingestion import pipeline
 from app.observability.logging import JsonFormatter, log
 
 
@@ -48,22 +46,18 @@ def test_an_exception_is_logged_as_its_class_only(lines):
     assert "Traceback" not in json.dumps(line)
 
 
-def test_a_failing_job_logs_which_kind_failed_not_what_the_error_said(
-    tenant, make_doc, monkeypatch, lines
+def test_a_failing_document_logs_the_error_class_not_what_the_error_said(
+    make_doc, monkeypatch, lines
 ):
-    def handler(session, doc):
+    def run(doc):
         raise ValueError("Jane Roe 1980-04-12 is not a valid member id")
 
-    monkeypatch.setitem(worker.HANDLERS, JobKind.NORMALIZE, handler)
-    doc = make_doc(DocumentStatus.RECEIVED)
-    with SessionLocal() as s:
-        enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.NORMALIZE)
-        s.commit()
+    monkeypatch.setattr(pipeline, "_run", run)
+    doc = make_doc()
 
-    assert worker.run_once() is True
+    pipeline.process(doc.id)
 
-    [line] = [x for x in lines() if x["event"] == "job_failed"]
-    assert line["kind"] == "normalize"
+    [line] = [x for x in lines() if x["event"] == "ingest_retry"]
     assert line["error_type"] == "ValueError"
     assert line["document_id"] == str(doc.id)
     assert "Jane" not in json.dumps(line)

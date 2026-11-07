@@ -13,8 +13,8 @@ from app.db import get_session
 from app.deps import actor, require_role
 from app.enums import DocumentType
 from app.models.principal import Principal
-from app.processing import answer, llm
-from app.search.retrieve import audit_views, retrieve
+from app.rag import answer, llm
+from app.search.retrieve import audit_views, inventory, retrieve
 
 router = APIRouter(tags=["Ask"])
 
@@ -72,13 +72,14 @@ def ask(
         detail={"via": "ask", "question": body.question},
     )
     db.commit()
+    listing = inventory(db, principal.tenant_id)
     # Give the pooled connection back for the seconds Claude takes; held, ~15
     # concurrent asks would drain the pool and stall every other route.
     db.close()
 
     llm.scope.set((principal.tenant_id, None))
     try:
-        segments = answer.run(body.question, hits, body.history)
+        segments = answer.run(body.question, hits, body.history, listing)
     except anthropic.BadRequestError:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, detail="the model rejected the request"

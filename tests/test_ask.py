@@ -1,6 +1,7 @@
 """POST /ask: retrieval -> audit -> Claude with search_result blocks -> cited answer.
 Real DB, fake vector store, fake Claude."""
 
+import datetime
 import types
 
 import anthropic
@@ -9,10 +10,11 @@ import pytest
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.enums import AuditAction, DocumentStatus, DocumentType, Role
+from app.enums import AuditAction, DocumentType, Role
 from app.models.audit_log import Log
 from app.models.document import Document
-from app.processing import embed, llm
+from app.rag import embed, llm
+from app.search.retrieve import inventory
 
 
 def text_block(text, *cited_indexes):
@@ -58,8 +60,8 @@ def claude(monkeypatch):
 @pytest.fixture
 def two_docs(make_doc, plant, query_encoder):
     """A denial (best match) and a claim, one chunk each."""
-    denial = make_doc(DocumentStatus.PUSHED, source_filename="d.pdf")
-    claim = make_doc(DocumentStatus.PUSHED)
+    denial = make_doc(source_filename="d.pdf")
+    claim = make_doc()
     with SessionLocal() as s:
         s.get(Document, denial.id).doc_type = DocumentType.DENIAL
         s.get(Document, claim.id).doc_type = DocumentType.CLAIMS
@@ -318,3 +320,52 @@ def test_the_ask_is_recorded_in_the_spend_ledger(client, staff, tenant, two_docs
     assert (row.purpose, row.model) == ("ask", "claude-haiku-5-5")
     assert (row.input_tokens, row.output_tokens) == (2400, 310)
     assert row.document_id is None  # a question spans documents
+
+
+def _mark_processed(*docs):
+    with SessionLocal() as s:
+        for doc in docs:
+            s.get(Document, doc.id).processed_at = datetime.datetime(2026, 11, 1)
+        s.commit()
+
+
+def test_the_inventory_goes_last_and_counts_only_processed_documents(
+    client, staff, two_docs, claude
+):
+    denial, _ = two_docs
+    _mark_processed(denial)
+
+    ask(client, staff())
+
+    *results, _ = claude.calls[0]["messages"][0]["content"]
+    assert [r["title"] for r in results][-1] == "Document inventory"
+    text = results[-1]["content"][0]["text"]
+    assert text.startswith("1 documents received")
+    assert "By type: denial 1" in text
+    assert "- d.pdf (denial, " in text
+
+
+def test_a_citation_of_the_inventory_is_not_a_document_citation(
+    client, staff, two_docs, claude
+):
+    _mark_processed(*two_docs)
+    claude.content = [text_block("Two documents.", 2)]
+
+    r = ask(client, staff(), "How many documents?")
+
+    assert r.status_code == 200
+    [segment] = r.json()["answer"]
+    assert segment["citations"] == []
+
+
+def test_the_inventory_never_lists_another_tenants_documents(
+    client, staff, two_docs, claude, other_tenant
+):
+    _mark_processed(*two_docs)
+
+    r = ask(client, staff(Role.REVIEWER, tenant_id=other_tenant))
+
+    assert r.status_code == 200
+    assert claude.calls == []  # that tenant retrieved nothing, so nothing was sent
+    with SessionLocal() as s:
+        assert inventory(s, other_tenant) == ""

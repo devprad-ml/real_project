@@ -1,4 +1,4 @@
-"""intake_bytes: the RECEIVED transition, with no mailbox involved."""
+"""intake_bytes: storing a document, with no mailbox involved."""
 
 import hashlib
 import uuid
@@ -7,9 +7,8 @@ import pytest
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.enums import DocumentStatus, JobKind
 from app.ingestion.intake import intake_bytes, safe_filename
-from app.models import Client, Document, Job, Log
+from app.models import Client, Document, Log
 
 
 def _intake(tenant, data=b"a denial letter", filename="denial.pdf"):
@@ -26,7 +25,7 @@ def _docs(tenant):
         return s.scalars(select(Document).where(Document.tenant_id == tenant)).all()
 
 
-def test_intake_writes_the_row_the_blob_and_the_job(tenant, blob):
+def test_intake_writes_the_row_and_the_blob(tenant, blob):
     data = b"a denial letter"
     doc = _intake(tenant, data)
     sha = hashlib.sha256(data).hexdigest()
@@ -37,15 +36,12 @@ def test_intake_writes_the_row_the_blob_and_the_job(tenant, blob):
 
     with SessionLocal() as s:
         fresh = s.get(Document, doc.id)
-        assert fresh.status == DocumentStatus.RECEIVED
+        assert fresh.processed_at is None
         assert fresh.sha256 == sha
         assert fresh.source_filename == "denial.pdf"
 
-        jobs = s.scalars(select(Job).where(Job.document_id == doc.id)).all()
-        assert [j.kind for j in jobs] == [JobKind.NORMALIZE]
-
         logs = s.scalars(select(Log).where(Log.document_id == doc.id)).all()
-        assert [log.detail["to"] for log in logs] == ["RECEIVED"]
+        assert [log.detail["event"] for log in logs] == ["received"]
 
 
 def test_the_same_bytes_twice_is_one_document(tenant, blob):
@@ -55,10 +51,11 @@ def test_the_same_bytes_twice_is_one_document(tenant, blob):
     assert second is None
     assert len(_docs(tenant)) == 1
     with SessionLocal() as s:
-        # Still one job -- a duplicate must not re-run the pipeline.
-        assert len(s.scalars(select(Job).where(Job.tenant_id == tenant)).all()) == 1
         logs = s.scalars(select(Log).where(Log.document_id == first.id)).all()
-        assert [log.detail.get("event") for log in logs] == [None, "duplicate_intake"]
+        assert [log.detail["event"] for log in logs] == [
+            "received",
+            "duplicate_intake",
+        ]
 
 
 def test_the_same_bytes_for_two_tenants_is_two_documents(tenant, blob):
@@ -75,7 +72,7 @@ def test_the_same_bytes_for_two_tenants_is_two_documents(tenant, blob):
         with SessionLocal() as s:
             from sqlalchemy import text
 
-            for table in ("jobs", "audit_log", "documents"):
+            for table in ("audit_log", "documents"):
                 s.execute(
                     text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
                     {"t": other},

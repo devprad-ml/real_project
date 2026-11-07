@@ -1,8 +1,6 @@
-from unittest.mock import MagicMock
-
 from fastapi import status
 
-from app.db import get_session
+from app.api import health
 
 
 # testing healthz
@@ -26,24 +24,13 @@ def test_readiness_ignores_the_vector_store(client, vectors):
     assert response.status_code == status.HTTP_200_OK
 
 
-# testing /readyz failure 
-def test_readiness_failure(client):
-    def broken_session():
-        mock_db = MagicMock()
-        mock_db.execute.side_effect = Exception("Database service not available")
-        return mock_db
-    # simulate the failure using mock db
-    client.app.dependency_overrides[get_session] = broken_session
+def test_readiness_failure(client, monkeypatch):
+    def down():
+        raise Exception("Database service not available")
 
-    try:
-        response = client.get("/readyz")
-        
-        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
-
-    finally:
-        # prevent test pollution: broken client leaking into success test scenarios
-        client.app.dependency_overrides.clear()
-
+    monkeypatch.setattr(health, "ping_database", down)
+    response = client.get("/readyz")
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 
 
 def test_every_route_thread_can_get_a_database_connection():
@@ -53,8 +40,10 @@ def test_every_route_thread_can_get_a_database_connection():
     from app.db import engine
 
     capacity = engine.pool.size() + engine.pool._max_overflow
-    # Exactly: more only spends Postgres connections that admission control never uses.
-    assert capacity == get_settings().threadpool_size
+    # Exactly: one per request thread, ingest thread and the timer. More only spends
+    # Postgres connections that nothing uses.
+    s = get_settings()
+    assert capacity == s.threadpool_size + s.ingest_workers + 1
 
 
 class _Limiter:
@@ -80,7 +69,7 @@ def test_a_request_over_capacity_gets_a_503_not_a_deadlock(client, monkeypatch):
     monkeypatch.setattr(get_settings(), "queue_timeout_seconds", 0.05)
     client.app.state.inflight = _Limiter(busy=True)
 
-    r = client.get("/readyz")
+    r = client.get("/search", params={"q": "x"})
 
     assert r.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     assert r.json()["detail"] == "server busy, retry shortly"
@@ -92,8 +81,18 @@ def test_liveness_answers_even_when_every_slot_is_taken(client):
     assert client.get("/healthz").status_code == status.HTTP_200_OK
 
 
+def test_readiness_answers_when_the_pod_is_saturated(client, monkeypatch):
+    """Every pod under the same load would fail readiness together and be pulled from
+    the balancer at once: a slow service turned into no service."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "queue_timeout_seconds", 0.05)
+    client.app.state.inflight = _Limiter(busy=True)
+    assert client.get("/readyz").status_code == status.HTTP_200_OK
+
+
 def test_the_slot_is_released_after_each_request(client, vectors):
     limiter = client.app.state.inflight = _Limiter(busy=False)
-    client.get("/readyz")
-    client.get("/readyz")
+    client.get("/search", params={"q": "x"})
+    client.get("/search", params={"q": "x"})
     assert (limiter.acquired, limiter.released) == (2, 2)

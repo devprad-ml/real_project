@@ -10,8 +10,11 @@ load_dotenv(dotenv_path=env, override=True)
 
 # The API lifespan would load the 90 MB embedder for every `client` fixture.
 os.environ.setdefault("WARM_EMBEDDER", "false")
+# Tests drive the pipeline directly; no timer polling or retrying behind their backs.
+os.environ.setdefault("BACKGROUND_LOOP", "false")
 
 # import pytest now
+import datetime  # noqa: E402
 import math  # noqa: E402
 import types  # noqa: E402
 import uuid  # noqa: E402
@@ -23,16 +26,15 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 # import app factory
 from app.db import SessionLocal  # noqa: E402
-from app import keys, storage  # noqa: E402
-from app.api import admin, documents, validation  # noqa: E402
-from app.enums import DocumentStatus, DocumentType, Role  # noqa: E402
-from app.ingestion import email_poller, intake  # noqa: E402
-from app.jobs import handlers  # noqa: E402
+from app import keys  # noqa: E402
+from app.api import admin, documents  # noqa: E402
+from app.enums import DocumentType, Role  # noqa: E402
+from app.ingestion import email_poller, intake, pipeline  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Client, Document  # noqa: E402
-from app.processing import classify, embed, extract, llm, normalize, pdftext  # noqa: E402
+from app.rag import classify, embed, llm, normalize, pdftext, rerank  # noqa: E402
 from app.search import retrieve  # noqa: E402
-from app.processing import bm25  # noqa: E402
+from app.rag import bm25  # noqa: E402
 from app.storage.vectors import Hit, Point, point_id, tenant_collection  # noqa: E402
 
 
@@ -45,8 +47,7 @@ def client():
 
 @pytest.fixture
 def db():
-    """A plain session. Tests that exercise the queue must commit for real --
-    SKIP LOCKED is only observable across committed transactions."""
+    """A plain session."""
     with SessionLocal() as session:
         yield session
 
@@ -83,15 +84,11 @@ def _throwaway_tenant():
                 {"t": tenant_id},
             )
         for table in (
-            "jobs",
             "llm_usage",
             "audit_log",
-            "extracted_fields",
-            "associations",
             "documents",
             "sources",
             "principals",
-            "members",
         ):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
@@ -126,17 +123,15 @@ def staff(tenant):
 
 @pytest.fixture
 def make_doc(tenant):
-    """Factory for documents rows at an arbitrary status. Intake tests go through
-    intake_bytes instead; the pipeline tests need to start mid-pipeline."""
+    """Factory for documents rows. Intake tests go through intake_bytes instead."""
 
-    def _make(status=DocumentStatus.RECEIVED, **kwargs):
+    def _make(**kwargs):
         with SessionLocal() as session:
             doc = Document(
                 tenant_id=tenant,
                 sha256=kwargs.pop("sha256", uuid.uuid4().hex * 2),
                 doc_type=DocumentType.UNKNOWN,
                 blob_key=kwargs.pop("blob_key", "raw/test/file.pdf"),
-                status=status,
                 **kwargs,
             )
             session.add(doc)
@@ -146,7 +141,7 @@ def make_doc(tenant):
     return _make
 
 
-# --- fakes shared by the handler and worker tests ----------------------------
+# --- fakes shared by the pipeline tests ----------------------------------------
 
 FAKE_PDFA = b"%PDF-1.7 fake pdfa"
 PAGE_TEXTS = ["page one text", "page two text", ""]
@@ -174,11 +169,9 @@ class FakeBlobStore:
 @pytest.fixture
 def blob(monkeypatch):
     store = FakeBlobStore({"raw/test/file.pdf": b"original record bytes"})
-    monkeypatch.setattr(handlers, "get_blob_store", lambda: store)
+    monkeypatch.setattr(pipeline, "get_blob_store", lambda: store)
     monkeypatch.setattr(intake, "get_blob_store", lambda: store)
-    monkeypatch.setattr(storage, "get_blob_store", lambda: store)
     monkeypatch.setattr(documents, "get_blob_store", lambda: store)
-    monkeypatch.setattr(validation, "get_blob_store", lambda: store)
     return store
 
 
@@ -193,7 +186,7 @@ def fake_tools(monkeypatch):
 class FakeVectorStore:
     """In-memory stand-in for qdrant. Keyed by collection, then by point id, so an
     upsert of an id already present overwrites -- the one behaviour of a real vector
-    DB that the embed handler's retry story depends on."""
+    DB that the pipeline's retries depend on."""
 
     def __init__(self):
         self.collections: dict[str, dict[str, object]] = {}
@@ -246,7 +239,7 @@ class FakeVectorStore:
 @pytest.fixture
 def vectors(monkeypatch):
     store = FakeVectorStore()
-    monkeypatch.setattr(handlers, "get_vector_store", lambda: store)
+    monkeypatch.setattr(pipeline, "get_vector_store", lambda: store)
     monkeypatch.setattr(retrieve, "get_vector_store", lambda: store)
     monkeypatch.setattr(admin, "get_vector_store", lambda: store)
     return store
@@ -260,11 +253,15 @@ QUERY_VECTOR = [1.0, 0.0, 0.0]
 @pytest.fixture
 def query_encoder(monkeypatch):
     monkeypatch.setattr(embed, "encode", lambda texts: [QUERY_VECTOR for _ in texts])
+    # Falling scores keep the store's order, so these tests stay about hybrid search.
+    monkeypatch.setattr(
+        rerank, "score", lambda query, texts: [-float(i) for i in range(len(texts))]
+    )
 
 
 @pytest.fixture
 def plant(vectors, tenant):
-    """Put a chunk straight into the tenant's collection, as handle_embed would."""
+    """Put a chunk straight into the tenant's collection, as index_document would."""
 
     def _plant(document_id, vector, *, page_no=1, idx=0, text="chunk"):
         vectors.upsert(
@@ -335,25 +332,6 @@ def fake_classifier(monkeypatch):
 
 
 @pytest.fixture
-def fake_extractor(monkeypatch):
-    """No Anthropic call in any test. Records the doc_type it was shown and answers
-    with whatever `result` holds, so a test can choose the fields and summary."""
-
-    class Fake:
-        result = extract.ExtractionResult(fields=[], summary="")
-        seen: list[tuple] = []
-
-        def run(self, doc_type, pages):
-            self.seen.append((doc_type, "\n".join(pages)))
-            return self.result
-
-    fake = Fake()
-    fake.seen = []
-    monkeypatch.setattr(extract, "run", fake.run)
-    return fake
-
-
-@pytest.fixture
 def fake_embedder(monkeypatch):
     """No torch, no model download in CI. The vector values are arbitrary but
     distinct per text, which is enough to assert chunk-to-vector alignment."""
@@ -373,11 +351,12 @@ class FakeMessage:
     headers, and a dict that kept only the last would hide that from the tests.
     """
 
-    def __init__(self, uid, obj):
+    def __init__(self, uid, obj, sent_at=datetime.datetime(2026, 11, 5, 9, 30)):
         self.uid = None if uid is None else str(uid)
         self.obj = obj
         self.from_ = obj["From"]
         self.subject = obj["Subject"]
+        self.date = sent_at
         self.headers = {
             key.lower(): tuple(v for k, v in obj.items() if k.lower() == key.lower())
             for key in obj.keys()
@@ -413,6 +392,7 @@ class FakeMailBox:
         self.messages = []
         self.seen = set()
         self.flag_fails = False  # a flag that never lands, after the commit did
+        self.last_criteria = None
 
     def __enter__(self):
         return self
@@ -428,6 +408,7 @@ class FakeMailBox:
         return {"UIDVALIDITY": 1}
 
     def fetch(self, criteria, **kwargs):
+        self.last_criteria = criteria
         return [m for m in self.messages if m.uid not in self.seen]
 
     def flag(self, uid, flag, value):
@@ -439,7 +420,9 @@ class FakeMailBox:
 @pytest.fixture
 def mailbox(monkeypatch):
     box = FakeMailBox()
+    box.submitted = []
     monkeypatch.setattr(email_poller, "_open_mailbox", lambda: box)
+    monkeypatch.setattr(pipeline, "submit", box.submitted.append)
     return box
 
 
@@ -450,11 +433,11 @@ APP_USER_URL = os.environ.get("APP_USER_DATABASE_URL")
 
 @pytest.fixture(scope="session")
 def app_user_sessionmaker():
-    """Sessions bound to `app_user`, the role the API and worker actually run as.
+    """Sessions bound to `app_user`, the role the API actually runs as.
 
     The rest of the suite connects as the owner because teardown needs DELETE. That
-    means no other test can see the grant model at all -- an handler that deleted a
-    row would pass here and raise InsufficientPrivilege in the worker.
+    means no other test can see the grant model at all -- code that deleted a row
+    would pass here and raise InsufficientPrivilege in the API.
     """
     if not APP_USER_URL:
         pytest.skip("APP_USER_DATABASE_URL not set; privilege tests need app_user")

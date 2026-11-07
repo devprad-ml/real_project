@@ -13,7 +13,7 @@ from app.db import SessionLocal
 from app.models.llm_usage import LlmUsage
 from app.observability.logging import log
 
-# (tenant_id, document_id) of the work being paid for. The worker sets it per job and
+# (tenant_id, document_id) of the work being paid for. The pipeline sets it per document and
 # /ask per request, so a Claude call needs no extra arguments to be attributed.
 scope: contextvars.ContextVar[tuple[uuid.UUID, uuid.UUID | None] | None] = (
     contextvars.ContextVar("llm_scope", default=None)
@@ -22,8 +22,8 @@ scope: contextvars.ContextVar[tuple[uuid.UUID, uuid.UUID | None] | None] = (
 
 @lru_cache
 def client() -> anthropic.Anthropic:
-    # SDK retries 429/5xx/connection errors itself (2 retries); past that the job
-    # queue's backoff takes over.
+    # SDK retries 429/5xx/connection errors itself (2 retries); past that the
+    # pipeline's retries take over.
     key = get_settings().anthropic_api_key.get_secret_value()
     return anthropic.Anthropic(api_key=key)
 

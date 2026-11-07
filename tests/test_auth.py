@@ -11,20 +11,20 @@ from app.deps import hash_key
 from app.enums import Role
 from app.models import ApiKey
 
-# /validation needs REVIEWER; /search needs any staff member.
-REVIEWER_ONLY = "/validation"
+STAFF_ROUTE = "/intake"
+ADMIN_ONLY = "/admin/stats"
 
 
-def test_a_reviewer_key_gets_in(client, staff):
-    assert client.get(REVIEWER_ONLY, headers=staff(Role.REVIEWER)).status_code == 200
+def test_a_staff_key_gets_in(client, staff):
+    assert client.get(STAFF_ROUTE, headers=staff(Role.REVIEWER)).status_code == 200
 
 
-def test_admin_passes_every_role_check(client, staff):
-    assert client.get(REVIEWER_ONLY, headers=staff(Role.ADMIN)).status_code == 200
+def test_admin_passes_the_admin_check(client, staff, vectors):
+    assert client.get(ADMIN_ONLY, headers=staff(Role.ADMIN)).status_code == 200
 
 
 def test_a_staff_member_without_the_role_is_a_403(client, staff):
-    assert client.get(REVIEWER_ONLY, headers=staff()).status_code == 403
+    assert client.get(ADMIN_ONLY, headers=staff()).status_code == 403
 
 
 @pytest.mark.parametrize(
@@ -39,7 +39,7 @@ def test_a_staff_member_without_the_role_is_a_403(client, staff):
 )
 def test_anything_but_a_live_key_is_a_401(client, tenant, authorization):
     headers = {} if authorization is None else {"Authorization": authorization}
-    r = client.get(REVIEWER_ONLY, headers=headers)
+    r = client.get(STAFF_ROUTE, headers=headers)
     assert r.status_code == 401
     assert r.headers["www-authenticate"] == "Bearer"
 
@@ -47,11 +47,11 @@ def test_anything_but_a_live_key_is_a_401(client, tenant, authorization):
 def test_a_revoked_key_is_a_401(client, tenant):
     key_id, key = keys.create(tenant, "leaver", [Role.REVIEWER])
     headers = {"Authorization": f"Bearer {key}"}
-    assert client.get(REVIEWER_ONLY, headers=headers).status_code == 200
+    assert client.get(STAFF_ROUTE, headers=headers).status_code == 200
 
     keys.revoke(key_id)
 
-    assert client.get(REVIEWER_ONLY, headers=headers).status_code == 401
+    assert client.get(STAFF_ROUTE, headers=headers).status_code == 401
 
 
 def test_only_the_hash_is_stored(tenant):

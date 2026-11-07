@@ -1,5 +1,4 @@
-''' The numbers behind GET /admin/stats: what is queued, stuck, failed, and spent.
-See m13.md §3.4. Always scoped to one tenant. '''
+''' The numbers behind GET /admin/stats: documents and Claude spend for one tenant. '''
 
 import datetime
 import uuid
@@ -8,11 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.enums import AuditAction, JobKind, JobState
-from app.jobs.queue import _utcnow
-from app.models.audit_log import Log
 from app.models.document import Document
-from app.models.job import Job
 from app.models.llm_usage import LlmUsage
 
 # USD per million tokens, (input, output). ponytail: as of 2026-10-25, typed in by hand.
@@ -34,62 +29,23 @@ def est_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
 
 
 def collect(db: Session, tenant_id: uuid.UUID) -> dict:
-    now = _utcnow()
-    lease = datetime.timedelta(seconds=get_settings().job_lease_seconds)
-
-    documents = {
-        status.value: n
-        for status, n in db.execute(
-            select(Document.status, func.count())
-            .where(Document.tenant_id == tenant_id)
-            .group_by(Document.status)
-        )
-    }
-
-    jobs = {k.value: {"pending": 0, "running": 0, "error": 0} for k in JobKind}
-    for kind, state, n in db.execute(
-        select(Job.kind, Job.state, func.count())
-        .where(Job.tenant_id == tenant_id)
-        .group_by(Job.kind, Job.state)
-    ):
-        if state != JobState.DONE:  # done rows only ever accumulate
-            jobs[kind.value][state.value] = n
-
-    # Queue lag: how long the oldest job that is *due* has been waiting. A backoff
-    # job not yet due is not lag, so it is not counted.
-    oldest_due = {
-        kind.value: int((now - oldest).total_seconds())
-        for kind, oldest in db.execute(
-            select(Job.kind, func.min(Job.run_after))
-            .where(
-                Job.tenant_id == tenant_id,
-                Job.state == JobState.PENDING,
-                Job.run_after <= now,
-            )
-            .group_by(Job.kind)
-        )
-    }
-
-    running, stale = db.execute(
+    ready, failed, processing = db.execute(
         select(
-            func.count(),
-            func.count().filter(Job.locked_at < func.now() - lease),  # the DB clock
-        ).where(Job.tenant_id == tenant_id, Job.state == JobState.RUNNING)
+            func.count().filter(Document.processed_at.is_not(None)),
+            func.count().filter(
+                Document.processed_at.is_(None),
+                Document.attempts >= get_settings().max_attempts,
+            ),
+            func.count().filter(
+                Document.processed_at.is_(None),
+                Document.attempts < get_settings().max_attempts,
+            ),
+        ).where(Document.tenant_id == tenant_id)
     ).one()
 
-    transitions = dict(
-        db.execute(
-            select(Log.detail["to"].as_string(), func.count())
-            .where(
-                Log.tenant_id == tenant_id,
-                Log.action == AuditAction.STATE_CHANGE,
-                Log.at >= now - datetime.timedelta(hours=1),
-                Log.detail["to"].as_string().is_not(None),
-            )
-            .group_by(Log.detail["to"].as_string())
-        ).all()
-    )
-
+    since = datetime.datetime.now(datetime.timezone.utc).replace(
+        tzinfo=None
+    ) - datetime.timedelta(hours=24)
     llm = []
     for purpose, model, calls, tin, tout, p50, p95 in db.execute(
         select(
@@ -101,10 +57,7 @@ def collect(db: Session, tenant_id: uuid.UUID) -> dict:
             func.percentile_cont(0.5).within_group(LlmUsage.latency_ms),
             func.percentile_cont(0.95).within_group(LlmUsage.latency_ms),
         )
-        .where(
-            LlmUsage.tenant_id == tenant_id,
-            LlmUsage.created_at >= now - datetime.timedelta(hours=24),
-        )
+        .where(LlmUsage.tenant_id == tenant_id, LlmUsage.created_at >= since)
         .group_by(LlmUsage.purpose, LlmUsage.model)
         .order_by(LlmUsage.purpose, LlmUsage.model)
     ):
@@ -122,12 +75,6 @@ def collect(db: Session, tenant_id: uuid.UUID) -> dict:
         )
 
     return {
-        "documents_by_status": documents,
-        "jobs": jobs,
-        "oldest_due_pending_s": oldest_due,
-        "running_jobs": running,
-        "stale_running": stale,
-        "dead_letter": sum(j["error"] for j in jobs.values()),
-        "transitions_last_hour": transitions,
+        "documents": {"ready": ready, "processing": processing, "failed": failed},
         "llm_24h": llm,
     }

@@ -3,27 +3,22 @@
 Every other test in this suite connects as the owner, because teardown needs DELETE.
 That makes the test environment *more* privileged than production, so none of these
 grants are exercised anywhere else: a handler that deleted a row would go green in CI
-and raise InsufficientPrivilege in the worker.
+and raise InsufficientPrivilege in the API.
 
-These tests connect as `app_user` -- the role the API and worker actually run as --
+These tests connect as `app_user` -- the role the API actually runs as --
 and assert the controls still exist. They are the only coverage the grant migrations
-(1513a549af5f, 3f4b8b1e99a0, 7c1d4e2fa903, c3d9a1e7f5b2, d8a4f2c6e913,
-e1b7c3d9a524, a2c8e5d1b937) have.
+(1513a549af5f, 3f4b8b1e99a0, c3d9a1e7f5b2, a2c8e5d1b937) have.
 """
 
 import pytest
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import ProgrammingError
 
 from app import keys
 from app.db import SessionLocal
 from app.deps import hash_key
-from app.enums import AuditAction, JobKind, JobState, Role
-from app.jobs.queue import enqueue
-from app.models import (
-    ApiKey, Association, Document, ExtractedFieldRow, Job, Log, Member, Principal,
-    RoleGrant,
-)
+from app.enums import AuditAction, Role
+from app.models import ApiKey, Document, Log, Principal, RoleGrant
 
 
 def test_connected_as_the_application_role(app_user_session):
@@ -43,7 +38,7 @@ def test_audit_log_rejects_updates(app_user_session, tenant, make_doc):
                 document_id=doc.id,
                 actor="system",
                 action=AuditAction.STATE_CHANGE,
-                detail={"to": "RECEIVED"},
+                detail={"event": "received"},
             )
         )
         s.commit()
@@ -62,15 +57,6 @@ def test_audit_log_rejects_deletes(app_user_session, tenant):
         )
 
 
-def test_jobs_reject_deletes(app_user_session, tenant):
-    """Jobs are history: attempts, last_error and timings are the only record of what
-    went wrong. Pruning is a retention job, not an application privilege."""
-    with pytest.raises(ProgrammingError, match="permission denied"):
-        app_user_session.execute(
-            text("DELETE FROM jobs WHERE tenant_id = :t"), {"t": tenant}
-        )
-
-
 def test_documents_reject_deletes(app_user_session, tenant):
     with pytest.raises(ProgrammingError, match="permission denied"):
         app_user_session.execute(
@@ -78,46 +64,27 @@ def test_documents_reject_deletes(app_user_session, tenant):
         )
 
 
-def test_app_user_can_do_what_the_worker_needs(app_user_session, tenant, make_doc):
+def test_app_user_can_do_what_the_pipeline_needs(app_user_session, tenant, make_doc):
     """The mirror image: the grants must not be so tight that the pipeline cannot
-    run. This is the write set of one normalize transition."""
+    run."""
     doc = make_doc()
 
     fresh = app_user_session.get(Document, doc.id)
-    fresh.page_count = 3  # UPDATE on documents
-    enqueue(  # INSERT on jobs
-        app_user_session, tenant_id=tenant, document_id=doc.id, kind=JobKind.CLASSIFY
-    )
+    fresh.attempts = 1  # UPDATE on documents
+    fresh.page_count = 3
     app_user_session.add(  # INSERT on audit_log
         Log(
             tenant_id=tenant,
             document_id=doc.id,
             actor="system",
             action=AuditAction.STATE_CHANGE,
-            detail={"to": "NORMALIZED"},
+            detail={"event": "processed"},
         )
     )
     app_user_session.commit()
 
     with SessionLocal() as s:
         assert s.get(Document, doc.id).page_count == 3
-
-
-def test_app_user_can_claim_and_update_a_job(app_user_session, tenant, make_doc):
-    """claim_one takes FOR UPDATE and the worker then writes state/locked_at, so
-    SELECT alone is not enough."""
-    doc = make_doc()
-    with SessionLocal() as s:
-        job = enqueue(s, tenant_id=tenant, document_id=doc.id, kind=JobKind.NORMALIZE)
-        s.commit()
-        job_id = job.id
-
-    claimed = app_user_session.get(Job, job_id, with_for_update=True)
-    claimed.state = JobState.RUNNING
-    app_user_session.commit()
-
-    with SessionLocal() as s:
-        assert s.get(Job, job_id).state == JobState.RUNNING
 
 
 def test_app_user_cannot_create_tables(app_user_session):
@@ -144,52 +111,6 @@ def test_api_keys_reject_deletes(app_user_session, tenant):
     """A revoked key stays as the record of who held access, and when."""
     with pytest.raises(ProgrammingError, match="permission denied"):
         app_user_session.execute(text("DELETE FROM api_keys"))
-
-
-def test_app_user_can_delete_extracted_fields(app_user_session, tenant, make_doc):
-    """Reclassify drops the old type's fields (their values go to the audit row)."""
-    doc = make_doc()
-    with SessionLocal() as s:
-        s.add(
-            ExtractedFieldRow(
-                tenant_id=tenant, document_id=doc.id, name="member_id", confidence=0.5
-            )
-        )
-        s.commit()
-
-    app_user_session.execute(
-        delete(ExtractedFieldRow).where(ExtractedFieldRow.document_id == doc.id)
-    )
-    app_user_session.commit()
-
-
-def test_app_user_can_load_members_and_bind_documents(app_user_session, tenant, make_doc):
-    """The CSV loader upserts members; the worker inserts associations."""
-    doc = make_doc()
-    m = Member(tenant_id=tenant, member_id="A1")
-    app_user_session.add(m)
-    app_user_session.flush()
-    m.first_name = "Ann"
-    app_user_session.add(
-        Association(
-            tenant_id=tenant, document_id=doc.id, member_pk=m.id, match_confidence=1.0
-        )
-    )
-    app_user_session.commit()
-
-
-def test_members_reject_deletes(app_user_session, tenant):
-    """A member a document was bound to must outlive the export that drops them."""
-    with pytest.raises(ProgrammingError, match="permission denied"):
-        app_user_session.execute(text("DELETE FROM members"))
-
-
-def test_app_user_can_replace_an_association(app_user_session, tenant, make_doc):
-    """M10: a re-match after review deletes the old binding (e1b7c3d9a524)."""
-    app_user_session.execute(
-        delete(Association).where(Association.document_id == make_doc().id)
-    )
-    app_user_session.commit()
 
 
 def test_llm_usage_rejects_updates(app_user_session, tenant):

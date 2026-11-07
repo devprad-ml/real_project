@@ -9,7 +9,7 @@ import pytest
 from app.config import get_settings
 from app.enums import DocumentType
 from app.errors import PermanentError
-from app.processing import classify
+from app.rag import classify
 
 
 def reply(doc_type, confidence, stop_reason="end_turn"):

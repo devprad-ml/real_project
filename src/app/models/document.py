@@ -7,14 +7,14 @@ from sqlalchemy import ForeignKey, Enum as SQLEnum
 from sqlalchemy.sql import func
 
 from app.models.base import Base
-from app.enums import DocumentStatus, DocumentType, RouteQueue
+from app.enums import DocumentType
 
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (UniqueConstraint("tenant_id","sha256", name="unique_tenant_sha256"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clients.id")) 
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("clients.id"))
     sha256: Mapped[str] = mapped_column(String(64))
     doc_type: Mapped[DocumentType] = mapped_column(SQLEnum(DocumentType, native_enum=False))  # unknown type is weak excuse for enterprise app
     blob_key: Mapped[str] = mapped_column(String(1024))
@@ -26,11 +26,9 @@ class Document(Base):
     page_count: Mapped[int | None] = mapped_column(nullable=True)
     received_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
-    status: Mapped[DocumentStatus] = mapped_column(SQLEnum(DocumentStatus, native_enum=False))  # cant have default for this
     classify_confidence: Mapped[float | None] = mapped_column(nullable=True)
-    summary: Mapped[str | None] = mapped_column(Text)
-    # Set by the route step. The downstream URL per queue is M10's.
-    route_queue: Mapped[RouteQueue | None] = mapped_column(
-        SQLEnum(RouteQueue, native_enum=False), nullable=True
-    )
-
+    # Null until the pipeline finishes. Null with attempts used up means it gave up.
+    processed_at: Mapped[datetime.datetime | None] = mapped_column(nullable=True)
+    attempts: Mapped[int] = mapped_column(default=0, server_default="0")
+    # Full exception text: may carry document content, so it stays out of logs.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

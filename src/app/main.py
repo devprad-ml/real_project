@@ -1,5 +1,6 @@
 ''' init fastAPI api factory, lifespan, router wiring'''
 # standard library imports always first
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,21 +17,42 @@ from app.api.admin import router as admin_router
 from app.api.ask import router as ask_router
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
+from app.api.dashboard import router as dashboard_router
 from app.api.health import router as health_router
-from app.api.review import router as review_router
 from app.api.search import router as search_router
-from app.api.validation import router as validation_router
-from app.api.webhooks import router as webhooks_router
 from app.config import get_settings
-from app.db import engine
+from app.db import SessionLocal, engine
+from app.ingestion import pipeline
+from app.ingestion.email_poller import poll_once
 from app.observability.logging import configure, log, request_id
-from app.processing import embed
+from app.rag import embed, rerank
 
 # check version match else revert to default
 try:
     __version__ = version("app")
 except PackageNotFoundError:
     __version__ = "0.1.0"
+
+
+def _tick() -> None:
+    ''' One pass of the timer. A mailbox outage must not stop retries, nor the reverse. '''
+    settings = get_settings()
+    if settings.imap_host:
+        try:
+            poll_once(SessionLocal)
+        except Exception as exc:
+            log.warning("intake_poll_failed", extra={"error_type": type(exc).__name__})
+    try:
+        pipeline.retry_unfinished()
+    except Exception as exc:
+        log.warning("retry_scan_failed", extra={"error_type": type(exc).__name__})
+
+
+async def _background_loop() -> None:
+    while True:
+        await asyncio.to_thread(_tick)
+        await asyncio.sleep(get_settings().imap_poll_seconds)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -42,6 +64,7 @@ async def lifespan(app: FastAPI):
     size = get_settings().threadpool_size
     anyio.to_thread.current_default_thread_limiter().total_tokens = size
     app.state.inflight = anyio.CapacityLimiter(size)
+    app.state.probe_slot = anyio.CapacityLimiter(1)  # /readyz's thread, not a route's
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
@@ -52,7 +75,14 @@ async def lifespan(app: FastAPI):
         # The first /ask after a deploy used to pay 19 s for this. Startup pays it once,
         # before the process accepts traffic.
         embed.encode(["warm-up"])
+        rerank.score("warm-up", ["warm-up"])
+    background = None
+    if get_settings().background_loop:
+        background = asyncio.create_task(_background_loop())
     yield
+    if background is not None:
+        background.cancel()
+        pipeline.shutdown()
     engine.dispose()
     log.info("database connection pool closed")
 
@@ -64,7 +94,8 @@ async def limit_inflight(request: Request, call_next):
     queue_timeout_seconds gets a clean 503 the client can retry.
     ponytail: released when the response starts, not when its body finishes; only
     matters for large streamed bodies (the PDF download). '''
-    if request.url.path == "/healthz":  # liveness must answer even when busy
+    # Probes must answer even when busy: a saturated pod is still alive and ready.
+    if request.url.path in ("/healthz", "/readyz"):
         return await call_next(request)
     limiter = request.app.state.inflight
     try:
@@ -126,9 +157,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(search_router)
     app.include_router(documents_router)
-    app.include_router(validation_router)
-    app.include_router(review_router)
-    app.include_router(webhooks_router)
+    app.include_router(dashboard_router)
     app.include_router(admin_router)
     app.include_router(ask_router)
     app.include_router(chat_router)

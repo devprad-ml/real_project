@@ -1,4 +1,4 @@
-''' Bytes in, RECEIVED document out. No IMAP in here -- the poller is one caller, an API
+''' Bytes in, stored document out. No IMAP in here -- the poller is one caller, an API
 upload endpoint would be another. '''
 
 import hashlib
@@ -10,8 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.log import write_audit
-from app.enums import AuditAction, DocumentStatus, DocumentType, JobKind
-from app.jobs.queue import enqueue
+from app.enums import AuditAction, DocumentType
 from app.models.document import Document
 from app.storage import get_blob_store
 
@@ -39,7 +38,8 @@ def intake_bytes(
     filename: str,
     source_id: uuid.UUID | None,
 ) -> Document | None:
-    ''' The whole RECEIVED transition. Returns None for a duplicate. Does not commit. '''
+    ''' Store the bytes and stage the row. Returns None for a duplicate. Does not commit;
+    the caller submits the document to the pipeline after its commit. '''
     filename = safe_filename(filename)
     sha = hashlib.sha256(data).hexdigest()  # of the record bytes, never a derived copy
 
@@ -63,8 +63,8 @@ def intake_bytes(
         )
         return None
 
-    # Blob before row, same discipline as handle_normalize: a crash leaves an orphan
-    # blob (cheap) rather than a RECEIVED row pointing at nothing (a poison job).
+    # Blob before row: a crash leaves an orphan blob (cheap) rather than a row pointing
+    # at nothing.
     key = f"raw/{tenant_id}/{sha}/{filename}"
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     get_blob_store().put(key, data, content_type)
@@ -74,12 +74,11 @@ def intake_bytes(
         sha256=sha,
         doc_type=DocumentType.UNKNOWN,
         blob_key=key,
-        status=DocumentStatus.RECEIVED,
         source_id=source_id,
         source_filename=filename,
     )
     session.add(doc)
-    session.flush()  # doc.id is needed by the audit row and the job
+    session.flush()  # doc.id is needed by the audit row
 
     write_audit(
         session,
@@ -87,7 +86,6 @@ def intake_bytes(
         document_id=doc.id,
         actor="system",
         action=AuditAction.STATE_CHANGE,
-        detail={"to": "RECEIVED", "filename": filename},
+        detail={"event": "received", "filename": filename},
     )
-    enqueue(session, tenant_id=tenant_id, document_id=doc.id, kind=JobKind.NORMALIZE)
     return doc

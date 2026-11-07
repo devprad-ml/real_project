@@ -3,7 +3,7 @@
 Only the keys in FIELDS are ever written. Anything else passed in `extra=` is
 dropped, so `extra={"question": q}` cannot leak by accident. An exception is logged as
 its class name only: the message (a Pydantic error echoes the bad value) and the
-traceback text can carry document content. The full repr is in `jobs.last_error`, inside
+traceback text can carry document content. The full repr is in `documents.error`, inside
 the database. Logs say which, the row says what.
 '''
 
@@ -16,7 +16,7 @@ import sys
 from app.config import get_settings
 
 FIELDS = (
-    "request_id", "tenant_id", "principal_id", "document_id", "job_id", "kind",
+    "request_id", "tenant_id", "principal_id", "document_id", "kind",
     "status", "route", "method", "status_code", "duration_ms", "attempts", "model",
     "input_tokens", "output_tokens", "error_type",
 )
@@ -51,7 +51,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure() -> None:
-    ''' Idempotent: the API and the worker both call it at startup. '''
+    ''' Idempotent: safe to call more than once. '''
     if any(isinstance(h.formatter, JsonFormatter) for h in log.handlers):
         return
     handler = logging.StreamHandler(sys.stdout)

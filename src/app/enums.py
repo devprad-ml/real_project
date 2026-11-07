@@ -11,37 +11,8 @@ class DocumentType(str, Enum):
     MEDICAL_RECORD = "medical_record"
     UNKNOWN = "unknown"
 
-class DocumentStatus(str, Enum):
-    RECEIVED = "RECEIVED"
-    NORMALIZED = "NORMALIZED"
-    CLASSIFIED = "CLASSIFIED"
-    EMBEDDED = "EMBEDDED"
-    EXTRACTED = "EXTRACTED"
-    NEEDS_REVIEW = "NEEDS_REVIEW"
-    ASSOCIATED = "ASSOCIATED"
-    ROUTED = "ROUTED"
-    PUSHED = "PUSHED"
-    FAILED = "FAILED"
-    
-
-class JobKind(str, Enum):
-    NORMALIZE = "normalize"
-    CLASSIFY = "classify"
-    EMBED = "embed"
-    EXTRACT = "extract"
-    ASSOCIATE = "associate"
-    ROUTE = "route"
-    PUSH = "push"
-
-
-class JobState(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    DONE = "done"
-    ERROR = "error"
-
-
 class AuditAction(str, Enum):
+    # Some members are no longer written, but old append-only rows still hold them.
     STATE_CHANGE = "state_change"
     VIEW = "view"
     EXPORT = "export"
@@ -52,19 +23,6 @@ class AuditAction(str, Enum):
     VERDICT = "verdict"  # the downstream's answer, when it changes no status
     
     
-
-
-
-
-
-
-class RouteQueue(str, Enum):
-    ''' Departmental work queues (BRD §6). '''
-
-    CLAIMS_OPS = "claims_ops"
-    APPEALS = "appeals"
-    UTILIZATION_MGMT = "utilization_mgmt"
-    MEMBER_SERVICES = "member_services"
 
 
 class Role(str, Enum):

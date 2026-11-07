@@ -9,7 +9,7 @@ Every point carries two vectors: `dense` (the embedding model, for meaning) and 
 RRF, which is how Azure AI Search does hybrid search too.
 
 The collection is an index, not a source of truth: every point is rebuilt from the
-normalized PDFs in blob storage by `python -m app.jobs.reindex`.
+normalized PDFs in blob storage by `python -m app.ingestion.reindex`.
 
 Tenant isolation is the collection name, not a payload filter. A filter is one
 forgotten `must` clause away from serving another client's chart notes; a wrong

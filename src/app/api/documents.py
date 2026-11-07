@@ -18,14 +18,14 @@ router = APIRouter(tags=["Documents"])
 
 
 def tenant_doc(
-    db: Session, principal: Principal, document_id: uuid.UUID, *, lock: bool = False
+    db: Session, principal: Principal, document_id: uuid.UUID
 ) -> Document:
     ''' The caller's document or 404. Another tenant's document is a 404 too, not a
     403: a 403 would confirm the id exists. '''
     stmt = select(Document).where(
         Document.id == document_id, Document.tenant_id == principal.tenant_id
     )
-    doc = db.scalar(stmt.with_for_update() if lock else stmt)
+    doc = db.scalar(stmt)
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="document not found")
     return doc

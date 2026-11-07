@@ -16,9 +16,8 @@ BATCH_SIZE = 32
 
 @lru_cache
 def _model():
-    ''' Loaded once per worker process, on first use. Weights download once, then
-    come from the HF cache -- bake that cache into the worker image so a cold
-    container does not pull 90MB before its first job. '''
+    ''' Loaded once per process, on first use. Weights download once, then come from
+    the HF cache. '''
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer(get_settings().embed_model)

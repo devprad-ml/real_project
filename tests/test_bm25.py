@@ -2,7 +2,7 @@
 
 import zlib
 
-from app.processing.bm25 import encode_doc, encode_query, tokens
+from app.rag.bm25 import encode_doc, encode_query, tokens
 
 
 def test_ids_and_codes_tokenise_the_same_on_both_sides():
@@ -17,7 +17,7 @@ def test_ids_and_codes_tokenise_the_same_on_both_sides():
 
 
 def test_indices_are_stable_across_processes():
-    """crc32, not hash(): the worker that wrote a chunk and the API that queries it are
+    """crc32, not hash(): the process that wrote a chunk and the one that queries it are
     different processes, and str hashes are salted per process."""
     indices, _ = encode_query("denial")
     assert indices == [zlib.crc32(b"denial")]
@@ -40,3 +40,11 @@ def test_query_weights_are_one_per_distinct_term():
     indices, values = encode_query("denial denial appeal")
     assert len(indices) == 2
     assert values == [1.0, 1.0]
+
+
+def test_a_query_drops_filler_words_so_the_identifier_counts():
+    assert encode_query("what is the claim C-7113") == encode_query("claim C-7113")
+
+
+def test_a_query_of_only_filler_words_keeps_them():
+    assert encode_query("what is the")[0]

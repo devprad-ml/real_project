@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: SecretStr
     # Migrations run as an owner/superuser (CREATE TABLE, CREATE ROLE, GRANT);
-    # database_url is the narrow app_user the API and worker run as. Unset in CI,
+    # database_url is the narrow app_user the API runs as. Unset in CI,
     # where the single DATABASE_URL already has the rights.
     alembic_database_url: SecretStr | None = None
     blob_backend: str = "local"   # local or AWS S3
@@ -18,28 +18,17 @@ class Settings(BaseSettings):
     classify_model: str = "claude-haiku-5-5"
     # Leading characters sent to classify; the type is almost always on page one.
     classify_max_chars: int = Field(8000, ge=1)
-    # Extraction has to hold several named fields plus a summary in mind at once --
-    # real reading comprehension, not a single-label pick. Open to revisiting against
-    # Haiku once accuracy is measured on real documents.
-    extract_model: str = "claude-sonnet-5-5"
-    # A field can be on any page, so extraction needs more of the document than
-    # classify did.
-    extract_max_chars: int = Field(20000, ge=1)
     # Haiku 5.5 at effort medium (answer.py), chosen on cost over Sonnet 5.5 (~12x)
     # after a live comparison (m12.md §8). Low effort left facts uncited.
     ask_model: str = "claude-haiku-5-5"
     # Chunks retrieved per question: ~a few thousand input tokens.
     ask_top_k: int = Field(8, ge=1, le=20)
-    confidence_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    # Tries per document, one per imap_poll_seconds tick, before it stays failed.
     max_attempts: int = Field(5, ge=1)
-    # Push waits out downstream outages: with the 15-min backoff cap and jitter, 30
-    # attempts is 2.6-5.3 h of retrying before FAILED (m10.md §3).
-    push_max_attempts: int = Field(30, ge=1)
-    # A running job refreshes its lock every heartbeat, so a lock this stale means its
-    # worker died. Kill-to-reclaim is at most lease + sweep = 45 s (m13.md §2.1).
-    job_lease_seconds: int = Field(30, ge=1)
-    job_heartbeat_seconds: int = Field(10, ge=1)
-    sweep_seconds: int = Field(15, ge=1)
+    # Documents processed side by side. OCR is CPU-heavy, so keep this near the core count.
+    ingest_workers: int = Field(4, ge=1)
+    # The mailbox and retry timer. Off in tests.
+    background_loop: bool = True
     # Load the embedder at API startup instead of on the first /ask (19 s, m12.md §7).
     warm_embedder: bool = True
     log_level: str = "INFO"
@@ -52,7 +41,7 @@ class Settings(BaseSettings):
     # this they get a 503 instead of an unbounded queue.
     queue_timeout_seconds: float = Field(10, gt=0)
     # Which VectorStore the app uses: "qdrant" (local, the default) or "azure" (Azure AI
-    # Search). Switching needs `python -m app.jobs.reindex`; the stores share no data.
+    # Search). Switching needs `python -m app.ingestion.reindex`; the stores share no data.
     vector_backend: str = "qdrant"
     qdrant_url: str = "http://localhost:6333"
     azure_search_endpoint: str = ""
@@ -62,6 +51,7 @@ class Settings(BaseSettings):
     # a fixed vector size, so swapping the model means a new collection, not a reuse.
     embed_model: str = "all-MiniLM-L6-v2"
     embed_dim: int = Field(384, ge=1)
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     imap_host: str | None = None
     imap_user: str | None = None
     imap_password: SecretStr | None = None
@@ -70,11 +60,13 @@ class Settings(BaseSettings):
     # Messages fetched per poll. bulk=True keeps the batch in memory, so a backlog
     # needs a ceiling; the remainder waits for the next tick.
     imap_batch_size: int = Field(50, ge=1)
+    # Floor on how far back a poll will look, in days. Without this, wiring a new
+    # tenant to a mailbox that already has years of unread mail tries to ingest all
+    # of it as documents. 0 disables the floor (fetch every unseen message, however
+    # old).
+    imap_lookback_days: int = Field(3, ge=0)
     # Cap at intake: the blob is never written, so an oversized attachment costs nothing.
     max_attachment_bytes: int = Field(25 * 1024 * 1024, ge=1)
-    downstream_base_url: str  # str for now, change to HttpUrl later
-    # Required: a missing secret must stop startup, never mean "accept unsigned".
-    downstream_webhook_secret: SecretStr
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 @lru_cache

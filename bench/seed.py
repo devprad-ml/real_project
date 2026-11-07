@@ -1,11 +1,11 @@
-''' Seed tenants and documents straight into the pipeline, past normalize.
+''' Seed tenants and documents straight into the store, past normalize.
 
 Ghostscript and Tesseract are not installed on the dev host, so documents cannot be
 normalized here. These start at the first step after it: hand-made text PDFs already in
 the blob store, as normalize would have left them.
 
     python -m bench.seed demo              # a small tenant + API key for bench.load
-    python -m bench.seed tenant <intake address> [member id ...]   # empty, for email
+    python -m bench.seed tenant <intake address>   # empty, for email
     python -m bench.seed pdfs <folder>     # the demo documents as PDFs, to email
     python -m bench.seed cleanup <tenant>  # remove a tenant and its vectors
 '''
@@ -16,15 +16,13 @@ import hashlib
 import sys
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 
 from app import keys
 from app.db import SessionLocal
-from app.enums import DocumentStatus, DocumentType, JobKind, Role, RouteQueue
-from app.jobs.handlers import index_document
-from app.jobs.queue import enqueue
-from app.models import Client, Document, Member
-from app.processing import mpi
+from app.enums import DocumentType, Role
+from app.ingestion.pipeline import index_document
+from app.models import Client, Document
 from app.storage import get_blob_store, get_vector_store
 from app.storage.vectors import tenant_collection
 
@@ -78,21 +76,13 @@ def new_tenant(session, name: str = "bench") -> uuid.UUID:
     return tenant
 
 
-def add_member(session, tenant: uuid.UUID, member_id: str) -> None:
-    session.add(Member(tenant_id=tenant, member_id=mpi.normalize_id(member_id)))
-    session.flush()
-
-
 def add_doc(
     session,
     tenant: uuid.UUID,
     *,
-    status: DocumentStatus,
     doc_type: DocumentType,
     pages: list[list[str]],
     filename: str,
-    job: JobKind | None = None,
-    route_queue: RouteQueue | None = None,
     embed_now: bool = False,
 ) -> Document:
     data = make_pdf(pages)
@@ -106,15 +96,12 @@ def add_doc(
     doc = Document(
         id=doc_id, tenant_id=tenant, sha256=sha, doc_type=doc_type, blob_key=raw,
         normalized_blob_key=derived, page_count=len(pages), source_filename=filename,
-        status=status, classify_confidence=0.95, route_queue=route_queue,
-        summary="bench document",
+        classify_confidence=0.95, processed_at=func.now(),
     )
     session.add(doc)
     session.flush()
     if embed_now:
         index_document(doc)
-    if job is not None:
-        enqueue(session, tenant_id=tenant, document_id=doc.id, kind=job)
     return doc
 
 
@@ -129,8 +116,7 @@ def cleanup(tenant: uuid.UUID) -> None:
                 {"t": tenant},
             )
         for table in (
-            "jobs", "llm_usage", "audit_log", "extracted_fields", "associations",
-            "documents", "sources", "principals", "members",
+            "llm_usage", "audit_log", "documents", "sources", "principals",
         ):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
@@ -183,7 +169,7 @@ def demo() -> None:
     with SessionLocal() as session:
         tenant = new_tenant(session, "demo")
         for name, dtype, pages in docs:
-            add_doc(session, tenant, status=DocumentStatus.EMBEDDED, doc_type=dtype,
+            add_doc(session, tenant, doc_type=dtype,
                     pages=pages, filename=name, embed_now=True)
         session.commit()
     _, key = keys.create(tenant, "bench", [Role.ADMIN])
@@ -201,18 +187,14 @@ def write_pdfs(folder: str) -> None:
         print(out / name)
 
 
-def tenant(intake_address: str, member_ids: list[str]) -> None:
-    ''' An empty tenant that email to `intake_address` is routed to, its patient list,
-    and an admin key. For the live demo: documents arrive by email, nothing is seeded. '''
+def tenant(intake_address: str) -> None:
+    ''' An empty tenant that email to `intake_address` is routed to, and an admin key. For the live demo: documents arrive by email, nothing is seeded. '''
     with SessionLocal() as session:
         tenant_id = uuid.uuid4()
         session.add(
             Client(id=tenant_id, name=f"demo-{tenant_id}",
                    intake_address=intake_address.lower())
         )
-        session.flush()
-        for member_id in member_ids:
-            add_member(session, tenant_id, member_id)
         session.commit()
     _, key = keys.create(tenant_id, "demo admin", [Role.ADMIN])
     print(f"tenant {tenant_id}")
@@ -224,8 +206,8 @@ if __name__ == "__main__":
         demo()
     elif sys.argv[1:2] == ["pdfs"] and len(sys.argv) == 3:
         write_pdfs(sys.argv[2])
-    elif sys.argv[1:2] == ["tenant"] and len(sys.argv) >= 3:
-        tenant(sys.argv[2], sys.argv[3:])
+    elif sys.argv[1:2] == ["tenant"] and len(sys.argv) == 3:
+        tenant(sys.argv[2])
     elif sys.argv[1:2] == ["cleanup"] and len(sys.argv) == 3:
         cleanup(uuid.UUID(sys.argv[2]))
     else:

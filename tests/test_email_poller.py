@@ -8,7 +8,6 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.enums import DocumentStatus
 from app.ingestion import email_poller
 from app.ingestion.email_poller import MAX_EML_DEPTH, _attachments, poll_once
 from app.models import Document, Src
@@ -34,12 +33,13 @@ def test_one_attachment_becomes_one_document(tenant, blob, mailbox):
     assert poll_once(SessionLocal) == 1
 
     [doc] = _docs(tenant)
-    assert doc.status == DocumentStatus.RECEIVED
+    assert mailbox.submitted == [doc.id]
     assert doc.source_filename == "a.pdf"
     [src] = _sources(tenant)
     assert doc.source_id == src.id
     assert src.channel == "email"
     assert src.raw_meta["from"] == "billing@hospital.example"
+    assert src.raw_meta["sent_at"] == "2026-11-05T09:30:00"
     assert mailbox.seen == {"1"}
 
 
@@ -99,6 +99,33 @@ def test_an_unknown_recipient_is_dropped_and_flagged(tenant, blob, mailbox):
 
     assert _docs(tenant) == [] and _sources(tenant) == []
     assert mailbox.seen == {"1"}  # flagged, or it would be re-fetched forever
+
+
+def test_a_poll_never_looks_further_back_than_the_lookback_floor(
+    tenant, blob, mailbox
+):
+    """Without a floor, the first poll against a mailbox that already has years of
+    unread mail would try to ingest all of it as documents."""
+    import datetime
+
+    poll_once(SessionLocal)
+
+    assert "SINCE" in str(mailbox.last_criteria)
+    expected = datetime.date.today() - datetime.timedelta(
+        days=get_settings().imap_lookback_days
+    )
+    assert f"{expected.day}-{expected:%b-%Y}" in str(mailbox.last_criteria)
+
+
+def test_a_disabled_lookback_floor_fetches_everything_unseen(
+    tenant, blob, mailbox, monkeypatch
+):
+    no_floor = get_settings().model_copy(update={"imap_lookback_days": 0})
+    monkeypatch.setattr(email_poller, "get_settings", lambda: no_floor)
+
+    poll_once(SessionLocal)
+
+    assert "SINCE" not in str(mailbox.last_criteria)
 
 
 def test_delivered_to_beats_a_non_matching_to(tenant, blob, mailbox):

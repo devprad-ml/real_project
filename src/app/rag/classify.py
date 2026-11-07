@@ -16,12 +16,22 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.enums import DocumentType
 from app.errors import PermanentError
-from app.processing import llm
+from app.rag import llm
 
 SYSTEM = (
     "You classify healthcare and insurance operational documents received by a health "
-    "plan. Pick the single best document type for the document you are given. Use "
-    "'unknown' when no type fits or the text is too garbled to tell. Confidence is "
+    "plan. Pick the single best document type for the document you are given, judging "
+    "by what the document does rather than by the claim numbers it mentions:\n"
+    "- claims: a provider's request for payment, such as a CMS-1500 or UB-04 form.\n"
+    "- denial: the payer's decision not to pay or cover something, including an "
+    "explanation of benefits or remittance advice showing a denial or adjustment code "
+    "with nothing paid.\n"
+    "- appeal: a request to overturn a denial.\n"
+    "- prior_auth: a request for approval before a service.\n"
+    "- correspondence: a letter or inquiry that is none of the others.\n"
+    "- consent: a signed authorization to use or disclose information.\n"
+    "- medical_record: clinical notes, results or chart pages.\n"
+    "Use 'unknown' when no type fits or the text is too garbled to tell. Confidence is "
     "your probability, from 0 to 1, that the type is correct."
 )
 
