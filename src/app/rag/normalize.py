@@ -148,8 +148,14 @@ def run(data: bytes) -> tuple[bytes, int]:
     A born-digital PDF (real text layer, or a fillable form with field values) is
     returned as-is: OCR would gain nothing and, for a fillable form, destroys the
     AcroForm that pdftext reads field values from. Only a scan goes through OCR. '''
+    from pypdf.errors import PdfReadError
+
     pdf = to_pdf(sniff(data), data)
-    if has_text_layer(pdf):
-        return pdf, page_count(pdf)
+    try:
+        if has_text_layer(pdf):
+            return pdf, page_count(pdf)
+    except PdfReadError as exc:
+        # Damaged bytes stay damaged, so retrying only delays telling anyone.
+        raise PermanentError(f"unreadable PDF: {type(exc).__name__}") from exc
     pdfa = to_pdfa(pdf)
     return pdfa, page_count(pdfa)

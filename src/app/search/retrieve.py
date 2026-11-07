@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.audit.log import write_audit
 from app.enums import AuditAction, DocumentType
 from app.models.document import Document
+from app.observability import tracing
 from app.rag import bm25, embed, rerank
 from app.storage import get_vector_store
 from app.storage.vectors import Hit, tenant_collection
@@ -72,6 +73,23 @@ def retrieve(
 ) -> list[SearchHit]:
     ''' Ranked hits, nothing audited. Every caller must audit what it discloses:
     `search` below for /search, `api.ask` for /ask. '''
+    with tracing.observe("retrieve", as_type="retriever", input=query) as traced:
+        hits = _retrieve(session, tenant_id, query, limit)
+        tracing.finish(
+            traced,
+            output=[(h.filename, h.page_no, round(h.score, 2)) for h in hits],
+            metadata={
+                "hits": len(hits),
+                "top_score": round(hits[0].score, 2) if hits else None,
+                "document_ids": list(dict.fromkeys(str(h.document_id) for h in hits)),
+            },
+        )
+        return hits
+
+
+def _retrieve(
+    session: Session, tenant_id: uuid.UUID, query: str, limit: int
+) -> list[SearchHit]:
     # The same encode index_document uses: vectors from two different models are not
     # comparable, so there is exactly one place a vector can come from.
     vector = embed.encode([query])[0]

@@ -12,6 +12,8 @@ load_dotenv(dotenv_path=env, override=True)
 os.environ.setdefault("WARM_EMBEDDER", "false")
 # Tests drive the pipeline directly; no timer polling or retrying behind their backs.
 os.environ.setdefault("BACKGROUND_LOOP", "false")
+# Forced, not defaulted: real keys in .env must never send test data to Langfuse.
+os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 
 # import pytest now
 import datetime  # noqa: E402
@@ -84,7 +86,6 @@ def _throwaway_tenant():
                 {"t": tenant_id},
             )
         for table in (
-            "llm_usage",
             "audit_log",
             "documents",
             "sources",

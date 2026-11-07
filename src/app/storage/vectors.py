@@ -17,6 +17,7 @@ collection name raises "collection not found" and fails closed. In a HIPAA-shape
 system that difference is the whole design.
 '''
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -87,6 +88,7 @@ class QdrantVectorStore:
         self.dim = dim
         self._client = None
         self._ensured: set[str] = set()
+        self._ensure_lock = threading.Lock()
 
     @property
     def client(self):
@@ -108,20 +110,25 @@ class QdrantVectorStore:
             VectorParams,
         )
 
-        if not self.client.collection_exists(collection):
-            self.client.create_collection(
-                collection,
-                vectors_config={
-                    DENSE: VectorParams(size=self.dim, distance=Distance.COSINE)
-                },
-                # IDF is computed by qdrant from this collection's own statistics, so
-                # each tenant's keyword weights come from that tenant's documents.
-                sparse_vectors_config={SPARSE: SparseVectorParams(modifier=Modifier.IDF)},
-            )
-        # ponytail: cached per process, so an out-of-band collection delete is not
-        # noticed until restart. Drop the cache if collections start being managed
-        # anywhere but here.
-        self._ensured.add(collection)
+        # A new tenant's first documents arrive side by side, and all but one of the
+        # threads would otherwise fail creating a collection that now exists.
+        with self._ensure_lock:
+            if not self.client.collection_exists(collection):
+                self.client.create_collection(
+                    collection,
+                    vectors_config={
+                        DENSE: VectorParams(size=self.dim, distance=Distance.COSINE)
+                    },
+                    # IDF is computed by qdrant from this collection's own statistics, so
+                    # each tenant's keyword weights come from that tenant's documents.
+                    sparse_vectors_config={
+                        SPARSE: SparseVectorParams(modifier=Modifier.IDF)
+                    },
+                )
+            # ponytail: cached per process, so an out-of-band collection delete is not
+            # noticed until restart. Drop the cache if collections start being managed
+            # anywhere but here.
+            self._ensured.add(collection)
 
     def upsert(self, collection: str, points: list[Point]) -> None:
         if not points:

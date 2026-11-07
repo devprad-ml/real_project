@@ -7,7 +7,6 @@ send, and nothing has to be parsed out of the answer text.
 PHI leaves the boundary on every call. Production needs a BAA with Anthropic.
 '''
 
-import time
 
 from pydantic import BaseModel, Field
 
@@ -115,26 +114,26 @@ def run(
     blocks = _blocks(hits)
     if inventory:
         blocks.append(_inventory_block(inventory))
-    started = time.perf_counter()
-    response = llm.client().beta.messages.create(
-        model=s.ask_model,
-        # A few sentences with citations; well inside a non-streaming request.
-        max_tokens=4096,
-        output_config={"effort": "medium"},
-        # Clinical text can trip a safety classifier on a legitimate question; this
-        # re-runs it on another model inside the same call instead of failing.
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-        system=SYSTEM,
-        messages=[
-            *past,
-            {
-                "role": "user",
-                "content": [*blocks, {"type": "text", "text": question}],
-            }
-        ],
-    )
-    llm.record("ask", s.ask_model, response, started)
+    messages = [
+        *past,
+        {"role": "user", "content": [*blocks, {"type": "text", "text": question}]},
+    ]
+    with llm.generation("answer", s.ask_model, messages) as traced:
+        response = llm.client().beta.messages.create(
+            model=s.ask_model,
+            # A few sentences with citations; well inside a non-streaming request.
+            max_tokens=4096,
+            output_config={"effort": "medium"},
+            # Clinical text can trip a safety classifier on a legitimate question; this
+            # re-runs it on another model inside the same call instead of failing.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            system=SYSTEM,
+            messages=messages,
+        )
+        llm.record(
+            traced, response, " ".join(b.text for b in response.content if b.type == "text")
+        )
     if response.stop_reason == "refusal":
         return None
 

@@ -18,8 +18,8 @@ admin = require_role(Role.ADMIN)
 def stats(
     principal: Principal = Depends(admin), db: Session = Depends(get_session)
 ) -> dict:
-    ''' Document counts and Claude spend for the caller's tenant. Tenant-scoped on
-    purpose: a global view would show tenant A the counts of tenant B. '''
+    ''' Document counts for the caller's tenant. Tenant-scoped on purpose: a global view
+    would show tenant A the counts of tenant B. '''
     body = stats_mod.collect(db, principal.tenant_id)
     try:
         get_vector_store().ping()

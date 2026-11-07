@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # Load the embedder at API startup instead of on the first /ask (19 s, m12.md §7).
     warm_embedder: bool = True
     log_level: str = "INFO"
+    # Tracing is off until both keys are set. EU accounts use the default URL, US accounts
+    # https://us.cloud.langfuse.com. Capture sends question and document text to Langfuse,
+    # so leave it off for anything but synthetic data unless there is a BAA.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_capture_content: bool = False
     # Threads that run sync routes (anyio's default is also 40). The DB pool is sized
     # from it in db.py: a request holds its connection while it waits for a thread, so
     # fewer connections than threads deadlocks under load (m13.md §8).
@@ -67,7 +74,11 @@ class Settings(BaseSettings):
     imap_lookback_days: int = Field(3, ge=0)
     # Cap at intake: the blob is never written, so an oversized attachment costs nothing.
     max_attachment_bytes: int = Field(25 * 1024 * 1024, ge=1)
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # utf-8-sig: some Windows editors save a byte-order mark, which would otherwise become
+    # part of the first setting's name and make it look missing.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8-sig", extra="ignore"
+    )
 
 @lru_cache
 def get_settings() -> Settings:

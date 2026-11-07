@@ -1,23 +1,12 @@
 ''' The Anthropic client and input trimming shared by every Claude call. '''
 
-import contextvars
-import time
-import uuid
 from functools import lru_cache
 from typing import Iterable
 
 import anthropic
 
 from app.config import get_settings
-from app.db import SessionLocal
-from app.models.llm_usage import LlmUsage
-from app.observability.logging import log
-
-# (tenant_id, document_id) of the work being paid for. The pipeline sets it per document and
-# /ask per request, so a Claude call needs no extra arguments to be attributed.
-scope: contextvars.ContextVar[tuple[uuid.UUID, uuid.UUID | None] | None] = (
-    contextvars.ContextVar("llm_scope", default=None)
-)
+from app.observability import tracing
 
 
 @lru_cache
@@ -41,30 +30,18 @@ def head(pages: Iterable[str], limit: int) -> str:
     return "\n\n".join(parts)[:limit].strip()
 
 
-def record(purpose: str, model: str, response, started: float) -> None:
-    ''' Ledger row for one Claude call that returned (m13.md §3.3).
+def generation(purpose: str, model: str, messages: list):
+    ''' Wrap one Claude call, and pass what it yields to `record`. '''
+    return tracing.observe(purpose, as_type="generation", model=model, input=messages)
 
-    Its own session and commit, never the caller's: a failing job rolls its session
-    back, but the money was spent either way, and a rolled-back ledger would
-    under-count exactly the expensive failures. Telemetry must not fail a request or a
-    job, so a recording error is logged and swallowed. '''
-    ctx = scope.get()
+
+def record(traced, response, output=None) -> None:
+    ''' Token usage and output onto the call's trace. Langfuse prices it from the model. '''
     usage = getattr(response, "usage", None)
-    if ctx is None or usage is None:
+    if usage is None:
         return
-    try:
-        with SessionLocal() as session:
-            session.add(
-                LlmUsage(
-                    tenant_id=ctx[0],
-                    document_id=ctx[1],
-                    purpose=purpose,
-                    model=model,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            )
-            session.commit()
-    except Exception as exc:
-        log.warning("llm_usage_not_recorded", extra={"error_type": type(exc).__name__})
+    tracing.finish(
+        traced,
+        output=output,
+        usage_details={"input": usage.input_tokens, "output": usage.output_tokens},
+    )

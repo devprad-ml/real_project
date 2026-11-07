@@ -99,5 +99,15 @@ that database.
 ## Not built
 
 Compared with the BRD: field extraction, human review, member matching, routing and
-downstream push were removed from this prototype, and there is no LLM evaluation or
-guardrail layer yet.
+downstream push were removed from this prototype, and there is no guardrail layer yet.
+
+## Tracing and evals
+
+Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` to trace questions
+and documents with their timing, tokens and cost. Question and document text is only sent
+with `LANGFUSE_CAPTURE_CONTENT=true`, so use that for synthetic data or under a BAA.
+
+```bash
+python -m bench.rag_eval load                 # synthetic documents, prints an API key
+python -m bench.rag_eval run <key> [base url] # 33 scored questions as a Langfuse experiment
+```

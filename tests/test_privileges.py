@@ -7,7 +7,7 @@ and raise InsufficientPrivilege in the API.
 
 These tests connect as `app_user` -- the role the API actually runs as --
 and assert the controls still exist. They are the only coverage the grant migrations
-(1513a549af5f, 3f4b8b1e99a0, c3d9a1e7f5b2, a2c8e5d1b937) have.
+(1513a549af5f, 3f4b8b1e99a0, c3d9a1e7f5b2) have.
 """
 
 import pytest
@@ -111,31 +111,3 @@ def test_api_keys_reject_deletes(app_user_session, tenant):
     """A revoked key stays as the record of who held access, and when."""
     with pytest.raises(ProgrammingError, match="permission denied"):
         app_user_session.execute(text("DELETE FROM api_keys"))
-
-
-def test_llm_usage_rejects_updates(app_user_session, tenant):
-    """The spend record is append-only, like audit_log (migration a2c8e5d1b937)."""
-    with pytest.raises(ProgrammingError, match="permission denied"):
-        app_user_session.execute(
-            text("UPDATE llm_usage SET input_tokens = 0 WHERE tenant_id = :t"),
-            {"t": tenant},
-        )
-
-
-def test_llm_usage_rejects_deletes(app_user_session, tenant):
-    with pytest.raises(ProgrammingError, match="permission denied"):
-        app_user_session.execute(
-            text("DELETE FROM llm_usage WHERE tenant_id = :t"), {"t": tenant}
-        )
-
-
-def test_llm_usage_accepts_inserts(app_user_session, tenant):
-    app_user_session.execute(
-        text(
-            "INSERT INTO llm_usage (id, tenant_id, purpose, model, input_tokens, "
-            "output_tokens, latency_ms) "
-            "VALUES (gen_random_uuid(), :t, 'ask', 'm', 1, 1, 1)"
-        ),
-        {"t": tenant},
-    )
-    app_user_session.rollback()  # not left behind for the tenant teardown to trip on

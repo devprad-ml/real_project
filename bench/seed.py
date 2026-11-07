@@ -116,7 +116,7 @@ def cleanup(tenant: uuid.UUID) -> None:
                 {"t": tenant},
             )
         for table in (
-            "llm_usage", "audit_log", "documents", "sources", "principals",
+            "audit_log", "documents", "sources", "principals",
         ):
             session.execute(
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608

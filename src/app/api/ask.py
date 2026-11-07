@@ -13,7 +13,8 @@ from app.db import get_session
 from app.deps import actor, require_role
 from app.enums import DocumentType
 from app.models.principal import Principal
-from app.rag import answer, llm
+from app.observability import tracing
+from app.rag import answer
 from app.search.retrieve import audit_views, inventory, retrieve
 
 router = APIRouter(tags=["Ask"])
@@ -46,6 +47,20 @@ def ask(
     principal: Principal = Depends(require_role()),
     db: Session = Depends(get_session),
 ) -> AskOut:
+    with tracing.observe(
+        "ask", tenant_id=principal.tenant_id, input=body.question
+    ) as traced:
+        out = _ask(body, principal, db)
+        tracing.finish(
+            traced,
+            output=" ".join(s.text for s in out.answer),
+            root=True,
+            metadata={"answered": out.answered, "sources": len(out.sources)},
+        )
+        return out
+
+
+def _ask(body: AskIn, principal: Principal, db: Session) -> AskOut:
     # "Why?" alone retrieves nothing useful. Current question first: the embedder
     # truncates at 256 tokens, so the old question is what gets cut.
     # ponytail: a topic change drags the old topic into retrieval; a Haiku
@@ -77,7 +92,6 @@ def ask(
     # concurrent asks would drain the pool and stall every other route.
     db.close()
 
-    llm.scope.set((principal.tenant_id, None))
     try:
         segments = answer.run(body.question, hits, body.history, listing)
     except anthropic.BadRequestError:

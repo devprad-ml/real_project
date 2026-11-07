@@ -17,8 +17,9 @@ from app.db import SessionLocal
 from app.enums import AuditAction
 from app.errors import PermanentError
 from app.models.document import Document
+from app.observability import tracing
 from app.observability.logging import log
-from app.rag import bm25, chunk, classify, embed, llm, normalize, pdftext
+from app.rag import bm25, chunk, classify, embed, normalize, pdftext
 from app.storage import get_blob_store, get_vector_store
 from app.storage.blob import normalized_key
 from app.storage.vectors import Point, point_id, tenant_collection
@@ -81,9 +82,15 @@ def process(document_id: uuid.UUID) -> None:
         doc.attempts += 1
         session.commit()
 
-        scope = llm.scope.set((tenant_id, document_id))
         try:
-            detail = _run(doc)
+            with tracing.observe(
+                "ingest",
+                tenant_id=tenant_id,
+                input=doc.source_filename,
+                metadata={"document_id": str(document_id), "attempt": doc.attempts},
+            ) as traced:
+                detail = _run(doc)
+                tracing.finish(traced, output=detail, root=True, metadata=detail)
             doc.processed_at = func.now()
             doc.error = None
             write_audit(
@@ -122,15 +129,14 @@ def process(document_id: uuid.UUID) -> None:
                     "error_type": type(exc).__name__,
                 },
             )
-        finally:
-            llm.scope.reset(scope)
 
 
 def _run(doc: Document) -> dict:
     ''' Every side effect overwrites a fixed key or point id, so a retry from the top
     is safe. '''
     blob = get_blob_store()
-    pdfa, pages = normalize.run(blob.get(doc.blob_key))
+    with tracing.observe("normalize"):
+        pdfa, pages = normalize.run(blob.get(doc.blob_key))
     result = classify.run(text for _, text in pdftext.pages(pdfa))
 
     doc.doc_type = result.doc_type
@@ -139,11 +145,13 @@ def _run(doc: Document) -> dict:
     doc.normalized_blob_key = normalized_key(doc.tenant_id, doc.id, doc.doc_type)
     blob.put(doc.normalized_blob_key, pdfa, "application/pdf")
 
+    with tracing.observe("embed"):
+        chunks = index_document(doc)
     return {
         "doc_type": result.doc_type.value,
         "confidence": result.confidence,
         "pages": pages,
-        "chunks": index_document(doc),
+        "chunks": chunks,
     }
 
 

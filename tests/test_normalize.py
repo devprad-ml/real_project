@@ -64,3 +64,9 @@ def test_ocr_only_despeckles_when_unpaper_is_installed(
     """clean=True without unpaper fails every scan with MissingDependencyError."""
     monkeypatch.setattr(normalize.shutil, "which", lambda name: found)
     assert _ocr_options(monkeypatch, tmp_path)["clean"] is clean
+
+
+def test_a_damaged_pdf_is_a_permanent_failure():
+    pytest.importorskip("pypdf")
+    with pytest.raises(PermanentError, match="unreadable PDF"):
+        normalize.run(b"%PDF-1.4\n1 0 obj\n<< /Type /Cat")

@@ -24,6 +24,7 @@ from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.ingestion import pipeline
 from app.ingestion.email_poller import poll_once
+from app.observability import tracing
 from app.observability.logging import configure, log, request_id
 from app.rag import embed, rerank
 
@@ -83,6 +84,7 @@ async def lifespan(app: FastAPI):
     if background is not None:
         background.cancel()
         pipeline.shutdown()
+    tracing.shutdown()
     engine.dispose()
     log.info("database connection pool closed")
 

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.deps import actor, require_role
 from app.models.principal import Principal
+from app.observability import tracing
 from app.search.retrieve import SearchHit, search
 
 router = APIRouter(tags=["Search"])
@@ -23,9 +24,16 @@ def search_documents(
 ) -> list[SearchHit]:
     # ponytail: the first search per process loads torch and the model (seconds).
     # Warm it in lifespan, or move encoding to its own service, when that matters.
-    hits = search(
-        db, tenant_id=principal.tenant_id, query=q, limit=limit, actor=actor(principal)
-    )
+    with tracing.observe("search", tenant_id=principal.tenant_id, input=q) as traced:
+        hits = search(
+            db, tenant_id=principal.tenant_id, query=q, limit=limit, actor=actor(principal)
+        )
+        tracing.finish(
+            traced,
+            output=[(h.filename, h.page_no) for h in hits],
+            root=True,
+            metadata={"hits": len(hits)},
+        )
     # Same session as the auth dependency's (FastAPI caches a dependency per request).
     # If this commit fails the caller gets a 500, never results without the audit rows.
     db.commit()
